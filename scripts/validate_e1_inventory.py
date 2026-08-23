@@ -77,22 +77,50 @@ class InventoryEvent(BaseModel):
     event_id: str
     event_type: E1EventType
     issuer: str
-    isin: str
+    isin: str | None = None
     announcement_date: date
     submission_date: date | None = None
     window_start: date | None = None
     window_end: date | None = None
     procedure_price: Decimal | None = None
-    price_basis: str
+    price_basis: str | None = None
     guarantor_bank: str | None = None
-    acquirer: str
+    acquirer: str | None = None
     source_document_refs: list[str]
+    # Fields that exist only inside the document text and have not been read
+    # out of it yet. Named explicitly rather than left as a bare None so
+    # "not extracted yet" is never confused with "read the document, the fact
+    # is genuinely absent" — the two mean different things to the checklist.
+    pending_fields: list[str] = []
+    # Free-text note on where the event came from when the index alone does
+    # not carry a field (e.g. which agency's message list listed it).
+    provenance: str | None = None
 
     @model_validator(mode="after")
     def _has_at_least_one_source(self) -> InventoryEvent:
         if not self.source_document_refs:
             raise ValueError("source_document_refs must not be empty: no public source, no event (TZ 6.1)")
         return self
+
+    @model_validator(mode="after")
+    def _pending_fields_are_real_and_empty(self) -> InventoryEvent:
+        known = set(type(self).model_fields) - {"pending_fields", "provenance"}
+        unknown = sorted(set(self.pending_fields) - known)
+        if unknown:
+            raise ValueError(f"pending_fields names unknown fields: {unknown}")
+        filled = sorted(f for f in self.pending_fields if getattr(self, f) not in (None, [], ""))
+        if filled:
+            raise ValueError(f"fields marked pending but already filled: {filled}")
+        return self
+
+    @property
+    def is_ready_for_classification(self) -> bool:
+        """Checklist rule D is fail-closed: incomplete data cannot be assessed.
+
+        An event still carrying pending_fields has unread document facts, so
+        the blind classification step must not run on it yet.
+        """
+        return not self.pending_fields
 
 
 class DocumentRecord(BaseModel):
@@ -223,6 +251,12 @@ def check_leakage(
         if event is None:
             problems.append(f"{event_id}: classification exists but no inventory event found")
             continue
+        if not event.is_ready_for_classification:
+            problems.append(
+                f"{event_id}: classified while still carrying pending_fields "
+                f"{event.pending_fields} — document facts unread, checklist rule D "
+                f"cannot be applied to incomplete data"
+            )
         cited_doc_ids: set[str] = set()
         for finding in (*record.criteria.values(), *record.disqualifiers.values()):
             cited_doc_ids.update(finding.source_doc_refs)
@@ -239,13 +273,28 @@ def check_leakage(
     return problems
 
 
-def coverage_report(events: dict[str, InventoryEvent]) -> str:
-    counts: Counter[tuple[str, int]] = Counter(
-        (event.event_type.value, event.announcement_date.year) for event in events.values()
-    )
-    lines = ["event_type,year,count"]
-    for (event_type, year), count in sorted(counts.items()):
-        lines.append(f"{event_type},{year},{count}")
+def coverage_report(
+    events: dict[str, InventoryEvent],
+    documents: dict[str, DocumentRecord] | None = None,
+) -> str:
+    """CSV of type x year x source, with how many rows still await document facts."""
+    documents = documents or {}
+    source_of = {doc_id: doc.source_type for doc_id, doc in documents.items()}
+
+    counts: Counter[tuple[str, int, str]] = Counter()
+    pending: Counter[tuple[str, int, str]] = Counter()
+    for event in events.values():
+        sources = {source_of.get(ref, "unknown") for ref in event.source_document_refs}
+        source = "+".join(sorted(sources)) if sources else "unknown"
+        key = (event.event_type.value, event.announcement_date.year, source)
+        counts[key] += 1
+        if not event.is_ready_for_classification:
+            pending[key] += 1
+
+    lines = ["event_type,year,source,count,pending_documents"]
+    for key in sorted(counts):
+        event_type, year, source = key
+        lines.append(f"{event_type},{year},{source},{counts[key]},{pending[key]}")
     return "\n".join(lines)
 
 
@@ -266,7 +315,7 @@ def main() -> int:
         f"{len(classifications)} classifications — no leakage detected."
     )
     print()
-    print(coverage_report(events))
+    print(coverage_report(events, documents))
     return 0
 
 

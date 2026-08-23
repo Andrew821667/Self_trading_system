@@ -152,5 +152,47 @@ def test_coverage_report_counts_by_type_and_year() -> None:
         ),
     }
     report = coverage_report(events)
-    assert "voluntary_or_mandatory_offer,2023,2" in report
-    assert "forced_buyback,2024,1" in report
+    assert "event_type,year,source,count,pending_documents" in report
+    assert "voluntary_or_mandatory_offer,2023,unknown,2,0" in report
+    assert "forced_buyback,2024,unknown,1,0" in report
+
+
+def test_coverage_report_breaks_down_by_source_and_counts_pending() -> None:
+    doc = make_document(doc_id="doc-1", source_type="disclosure_agency_azipi")
+    events = {
+        "e1-0001": make_event(event_id="e1-0001", source_document_refs=["doc-1"]),
+        "e1-0002": make_event(
+            event_id="e1-0002",
+            source_document_refs=["doc-1"],
+            isin=None,
+            pending_fields=["isin"],
+        ),
+    }
+    report = coverage_report(events, {doc.doc_id: doc})
+    assert "voluntary_or_mandatory_offer,2023,disclosure_agency_azipi,2,1" in report
+
+
+def test_pending_fields_must_name_real_fields() -> None:
+    with pytest.raises(ValidationError):
+        make_event(pending_fields=["not_a_field"])
+
+
+def test_pending_field_cannot_be_already_filled() -> None:
+    with pytest.raises(ValidationError):
+        make_event(isin="RU000A0EXAMPLE", pending_fields=["isin"])
+
+
+def test_event_with_pending_fields_is_not_ready_for_classification() -> None:
+    event = make_event(isin=None, pending_fields=["isin"])
+    assert event.is_ready_for_classification is False
+    assert make_event().is_ready_for_classification is True
+
+
+def test_check_leakage_flags_classification_of_event_with_pending_fields() -> None:
+    event = make_event(isin=None, pending_fields=["isin"])
+    doc = make_document()
+    classification = make_classification()
+    problems = check_leakage(
+        {event.event_id: event}, {doc.doc_id: doc}, {classification.event_id: classification}
+    )
+    assert any("pending_fields" in p for p in problems)

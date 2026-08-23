@@ -10,3 +10,8 @@ build/
 .env
 .env.*
 !.env.example
+
+# Stage E-1 raw HTML captures: large, and the .txt + .meta.json (with sha256)
+# next to them are what the pipeline reads. Re-fetchable via
+# scripts/fetch_azipi_documents.py from the committed index.
+stage-E-1/documents/**/*.html
