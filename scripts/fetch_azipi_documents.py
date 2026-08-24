@@ -19,11 +19,16 @@ import argparse
 import hashlib
 import json
 import re
+import socket
 import sys
 import time
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
+
+# urlopen's own timeout has been observed not to fire on a half-open socket
+# here (one fetch hung indefinitely mid-run); a default socket timeout does.
+socket.setdefaulttimeout(60)
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
