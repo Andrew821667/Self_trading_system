@@ -1,0 +1,21 @@
+{
+  "md5_from_index": "a241ead8c90e935461ef7b7f20bf1fe0",
+  "sha256": "22075a9c03f33568049d809dce0a8b84fb7e4b3b0a8fd9345a9231f540fa135e",
+  "bytes": 513169,
+  "url": "https://www.disclosure.ru/issuer/GetFileMD5?md5=a241ead8c90e935461ef7b7f20bf1fe0",
+  "source_type": "disclosure_agency_akm",
+  "inn": "5034050231",
+  "issuer": "Акционерное общество \"Научно-производственное предприятие \"Респиратор\"",
+  "title": "Письмо о добровольном предложении 06.09.2016",
+  "published_at": "06.09.2016",
+  "retrieved_at": "2026-08-25T10:43:04+00:00",
+  "legal_use_status": "public_disclosure",
+  "renditions": [
+    {
+      "member": "a241ead8c90e935461ef7b7f20bf1fe0.pdf",
+      "method": "text_layer",
+      "chars": 2251,
+      "rendition": "a241ead8c90e935461ef7b7f20bf1fe0--a241ead8c90e935461ef7b7f20bf1fe0.txt"
+    }
+  ]
+}

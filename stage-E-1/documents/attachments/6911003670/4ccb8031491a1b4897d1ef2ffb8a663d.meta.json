@@ -1,0 +1,21 @@
+{
+  "md5_from_index": "4ccb8031491a1b4897d1ef2ffb8a663d",
+  "sha256": "10a0228cb5e58eea5840410d8b73d0fad9851124160791750837de05a4c08052",
+  "bytes": 778876,
+  "url": "https://www.disclosure.ru/issuer/GetFileMD5?md5=4ccb8031491a1b4897d1ef2ffb8a663d",
+  "source_type": "disclosure_agency_akm",
+  "inn": "6911003670",
+  "issuer": "Акционерное общество \"Агрофирма Дмитрова Гора\"",
+  "title": "Рекомендации Совета Директоров АО «Агрофирма Дмитрова Гора» в отношении полученного от Новикова С.А. требования о выкупе ЦБ 17.03.2023",
+  "published_at": "17.03.2023",
+  "retrieved_at": "2026-08-25T10:44:42+00:00",
+  "legal_use_status": "public_disclosure",
+  "renditions": [
+    {
+      "member": "4ccb8031491a1b4897d1ef2ffb8a663d.pdf",
+      "method": "ocr",
+      "chars": 8428,
+      "rendition": "4ccb8031491a1b4897d1ef2ffb8a663d--4ccb8031491a1b4897d1ef2ffb8a663d.txt"
+    }
+  ]
+}

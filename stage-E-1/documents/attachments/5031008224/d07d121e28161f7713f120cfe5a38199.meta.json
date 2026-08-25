@@ -1,0 +1,21 @@
+{
+  "md5_from_index": "d07d121e28161f7713f120cfe5a38199",
+  "sha256": "59da759bc75b31a07450b4b8fc64ef55a2fd7740463695c7c07c3ecf3d21bb56",
+  "bytes": 24589373,
+  "url": "https://www.disclosure.ru/issuer/GetFileMD5?md5=d07d121e28161f7713f120cfe5a38199",
+  "source_type": "disclosure_agency_akm",
+  "inn": "5031008224",
+  "issuer": "Публичное акционерное общество \"Эталон\"",
+  "title": "Требование о выкупе эмиссионных ценных бумаг ПАО «Эталон» 18.01.2024",
+  "published_at": "18.01.2024",
+  "retrieved_at": "2026-08-25T10:37:59+00:00",
+  "legal_use_status": "public_disclosure",
+  "renditions": [
+    {
+      "member": "d07d121e28161f7713f120cfe5a38199.pdf",
+      "method": "ocr",
+      "chars": 26205,
+      "rendition": "d07d121e28161f7713f120cfe5a38199--d07d121e28161f7713f120cfe5a38199.txt"
+    }
+  ]
+}
