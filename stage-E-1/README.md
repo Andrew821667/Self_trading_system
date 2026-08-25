@@ -100,6 +100,36 @@ Bash (`curl`) с реалистичным `User-Agent`; см. `coverage_report.m
    git push origin e1-classified-frozen
    ```
 
+## Приложения к предложениям (`documents/attachments/`)
+
+Условия процедуры — цена, гарант, ценовая база, приобретатель — лежат не в
+сообщении о раскрытии, а в приложенных к нему файлах. Путь к ним:
+
+```sh
+bash scripts/setup_document_toolchain.sh          # bsdtar, poppler, tesseract-rus
+uv run python scripts/probe_disclosure_attachments.py \
+    --inventory stage-E-1/inventory/events.jsonl \
+    --index stage-E-1/inventory/azipi_index.jsonl \
+    --out-issuers stage-E-1/inventory/disclosure_ru_issuers.csv \
+    --out-documents stage-E-1/inventory/disclosure_ru_documents.csv
+uv run python scripts/fetch_disclosure_attachments.py \
+    --documents stage-E-1/inventory/disclosure_ru_documents.csv \
+    --out-dir stage-E-1/documents/attachments
+```
+
+Сырые файлы (`.bin`, распакованные члены архива) не коммитятся — они
+десятки мегабайт; коммитятся `.meta.json` с `sha256` и URL и текстовые
+рендиции, по которым файл всегда можно перекачать и сверить.
+
+**Число из OCR — не факт, пока не сверено с прописью.** Рендиция помечена
+способом получения (`text_layer` / `ocr` / `ooxml`) именно для этого: OCR
+ошибается в цифрах, а российские процедурные документы печатают сумму
+дважды — «8 (восемь) рублей 09 копеек». Пропись и есть контрольная сумма.
+
+Разбор этих текстов в поля инвентаря здесь не делается: структурная
+экстракция — предмет Stage E1 (ТЗ 6.3–6.5) с закреплённой моделью и золотым
+набором.
+
 ## Отступления от протокола
 
 Любое чтение данных после даты события до тега `e1-classified-frozen`

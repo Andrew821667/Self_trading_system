@@ -114,14 +114,29 @@ def issuers_from_inventory(inventory: Path, index: Path) -> dict[str, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--inventory", type=Path, required=True)
-    parser.add_argument("--index", type=Path, required=True)
+    parser.add_argument("--inventory", type=Path, help="events.jsonl (with --index)")
+    parser.add_argument("--index", type=Path, help="azipi_index.jsonl, for the INN of each event")
+    parser.add_argument(
+        "--inn-csv",
+        type=Path,
+        help="alternative input: any CSV with inn and issuer columns, e.g. "
+        "the delisting triggers, whose issuers are traded by construction",
+    )
     parser.add_argument("--out-issuers", type=Path, required=True)
     parser.add_argument("--out-documents", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=0, help="probe only the first N issuers")
     args = parser.parse_args()
 
-    issuers = issuers_from_inventory(args.inventory, args.index)
+    if args.inn_csv:
+        issuers = {
+            str(row["inn"]).strip(): row["issuer"]
+            for row in csv.DictReader(args.inn_csv.open(encoding="utf-8"))
+            if str(row.get("inn") or "").strip()
+        }
+    elif args.inventory and args.index:
+        issuers = issuers_from_inventory(args.inventory, args.index)
+    else:
+        parser.error("pass either --inn-csv or both --inventory and --index")
     inns = sorted(issuers)
     if args.limit:
         inns = inns[: args.limit]
