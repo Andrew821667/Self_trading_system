@@ -15,3 +15,9 @@ build/
 # next to them are what the pipeline reads. Re-fetchable via
 # scripts/fetch_azipi_documents.py from the committed index.
 stage-E-1/documents/**/*.html
+
+# Stage E-1 offer attachments: RAR/PDF scans, tens of MB each. The committed
+# .txt renditions and .meta.json (with sha256 + URL) are what the pipeline
+# reads and what makes them re-fetchable and verifiable.
+stage-E-1/documents/attachments/*/*.bin
+stage-E-1/documents/attachments/*/*/
