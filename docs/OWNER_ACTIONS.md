@@ -106,6 +106,22 @@ egrul.nalog.gov.ru
 | 184 | Поступление эмитенту уведомления о праве требовать выкупа эмиссионных ценных бумаг эмитента |
 | 185 | Поступление эмитенту требования о выкупе эмиссионных ценных бумаг эмитента |
 
+## Один раз: забрать проект на машину
+
+```sh
+cd ~
+git clone -b claude/new-project-spec-wx4utz https://github.com/Andrew821667/Self_trading_system.git
+cd Self_trading_system
+python3 -m venv .venv && source .venv/bin/activate
+```
+
+`python3`, а не `python` — на macOS второго обычно просто нет. `venv` нужен
+потому, что системный Python на свежих macOS запрещает `pip install` в себя
+(`externally-managed-environment`), и скрипт упал бы на установке playwright.
+
+Возвращаться в проект потом:
+`cd ~/Self_trading_system && source .venv/bin/activate`.
+
 ## Одна команда
 
 ```sh
