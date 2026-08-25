@@ -76,6 +76,19 @@ def require_tools() -> None:
         )
 
 
+def sniff_suffix(payload: bytes) -> str:
+    """File type from magic bytes. Titles are not a reliable source."""
+    if payload.startswith(b"%PDF"):
+        return ".pdf"
+    if payload.startswith(b"PK\x03\x04"):
+        return ".docx"  # OOXML; render_member reads it as a zip either way
+    if payload.startswith(b"{\\rtf"):
+        return ".rtf"
+    if payload.startswith(b"\xd0\xcf\x11\xe0"):
+        return ".doc"  # legacy OLE2 — recorded, not renderable here
+    return ".bin"
+
+
 def download(url: str, referer: str) -> bytes | None:
     for attempt in range(MAX_ATTEMPTS):
         request = urllib.request.Request(
@@ -209,8 +222,12 @@ def main() -> int:
         )
         members = [p for p in workdir.rglob("*") if p.is_file()]
         if not members:
-            # Not an archive — some entries are a bare PDF.
-            single = workdir / f"{md5}{Path(row['title']).suffix or '.pdf'}"
+            # Not every entry is an archive; some are a bare PDF or DOCX. The
+            # extension cannot come from the title — these titles end in a
+            # date ("Требование о выкупе акций АО НКГФ 23.10.2024"), so
+            # Path(title).suffix yields ".2024" and the renderer skips a real
+            # 14-page document as an unsupported type. Sniff magic bytes.
+            single = workdir / f"{md5}{sniff_suffix(payload)}"
             single.write_bytes(payload)
             members = [single]
 
