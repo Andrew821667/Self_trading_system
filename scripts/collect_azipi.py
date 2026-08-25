@@ -50,10 +50,24 @@ TYPE_CODES: dict[str, tuple[str, str]] = {
     "1079964": ("voluntary_or_mandatory_offer", "Поступление обязательного предложения"),
     "1079967": ("squeeze_out_request_95", "Поступление уведомления о праве требовать выкупа"),
     "1079969": ("squeeze_out_request_95", "Поступление требования о выкупе"),
-    # Candidates for buyback_art_75_76; kept separate because the mapping is
-    # not established from the message texts yet (see coverage_report.md).
-    "4005185": ("buyback_art_75_76", "Принятие решения о приобретении размещенных акций"),
-    "1080045": ("buyback_art_75_76", "Приобретение эмитентом собственных голосующих акций"),
+}
+
+# Collected earlier as candidates for buyback_art_75_76, then checked against
+# the document texts and rejected — they are NOT this family:
+#   1080045 "Приобретение эмитентом собственных голосующих акций" (473 docs)
+#   4005185 "Принятие решения о приобретении размещенных акций"    (46 docs)
+# Of those 519, 256 cite Art. 72 (a discretionary corporate buyback, which
+# has no legally-determined price and no obligation to buy from everyone —
+# the opposite of what this edge thesis trades), only 24 cite Art. 75/76, and
+# the rest name no norm at all. Worse, 1080045 is a post-factum report that an
+# acquisition already happened, not the announcement of a pending procedure,
+# so it cannot carry the announcement-to-deadline spread the thesis is about.
+# They stay collected under stage-E-1/inventory/out_of_family.jsonl for the
+# record but are excluded from the inventory. AZIPI's taxonomy has no direct
+# type for an Art. 75-76 buyback right; see coverage_report.md.
+OUT_OF_FAMILY_CODES: dict[str, str] = {
+    "1080045": "Приобретение эмитентом собственных голосующих акций",
+    "4005185": "Принятие решения о приобретении размещенных акций",
 }
 
 REQUEST_DELAY_SECONDS = 2.0

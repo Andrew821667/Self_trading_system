@@ -32,10 +32,20 @@ from pathlib import Path
 # below is reported as pending under one of these names.
 DOCUMENT_DERIVED_FIELDS = ("isin", "procedure_price", "price_basis", "guarantor_bank", "acquirer")
 
+# AZIPI type codes that genuinely belong to family E-1. The own-share-buyback
+# codes (1080045, 4005185) were collected as art. 75-76 candidates and then
+# rejected against their own texts — see OUT_OF_FAMILY_CODES in
+# collect_azipi.py. Their rows are written to a separate file rather than
+# dropped, so the collection record stays complete and auditable.
+IN_FAMILY_TYPE_CODES = frozenset({"1079963", "1079964", "1079967", "1079969"})
+
 _ISIN_RE = re.compile(r"\b(RU[A-Z0-9]{10})\b")
 _CLAUSE_RE = re.compile(r"^\s*(\d+\.\d+)\.?\s*(.+)$")
 
-ACQUIRER_HINT = "направившего добровольное"
+# Two wordings occur: the offer template ("лицо, направившее добровольное ...
+# предложение") and the buyout template ("лицо, направившее уведомление о
+# праве требовать выкуп ... или требование о выкупе").
+ACQUIRER_HINTS = ("направившего добровольное", "направившего уведомление о праве требовать")
 PRICE_HINT = "цена приобретаемых ценных бумаг"
 GUARANTOR_HINT = "гаранта, предоставившего банковскую гарантию"
 
@@ -80,19 +90,40 @@ def parse_price(digits: str, kopecks: str | None) -> Decimal | None:
     return value if 0 < value < Decimal(10_000_000) else None
 
 
+EMPTY_ANSWERS = ("отсутствует", "-", "—", "нет", "не применимо")
+
+
 def clause_body(text: str, hint: str) -> str | None:
-    """Answer part of the first numbered clause whose text contains `hint`."""
-    for line in text.splitlines():
+    """Answer part of the first numbered clause whose text contains `hint`.
+
+    Some issuers put the answer on the lines *after* the clause label instead
+    of behind its colon, so a clause that looks empty is followed up rather
+    than treated as absent.
+    """
+    lines = text.splitlines()
+    for position, line in enumerate(lines):
         match = _CLAUSE_RE.match(line)
-        if not match:
+        if not match or hint.lower() not in match.group(2).lower():
             continue
-        body = match.group(2)
-        if hint.lower() not in body.lower():
-            continue
-        _label, _sep, answer = body.partition(":")
+        _label, _sep, answer = match.group(2).partition(":")
         answer = re.sub(r"\s+", " ", answer).strip()
-        if answer and answer.rstrip(".").lower() not in ("отсутствует", "-", "—", "нет"):
+        if not answer:
+            answer = " ".join(
+                candidate.strip()
+                for candidate in lines[position + 1 : position + 4]
+                if candidate.strip() and not _CLAUSE_RE.match(candidate)
+            )
+            answer = re.sub(r"\s+", " ", answer).strip()
+        if answer and answer.rstrip(".").lower() not in EMPTY_ANSWERS:
             return answer
+    return None
+
+
+def clause_body_any(text: str, hints: tuple[str, ...]) -> str | None:
+    for hint in hints:
+        found = clause_body(text, hint)
+        if found:
+            return found
     return None
 
 
@@ -154,7 +185,7 @@ def build_row(index_row: dict, documents_dir: Path) -> dict | None:
         "procedure_price": procedure_price,
         "price_basis": price_basis_of(price_clause),
         "guarantor_bank": first_org(clause_body(text, GUARANTOR_HINT)),
-        "acquirer": first_org(clause_body(text, ACQUIRER_HINT)),
+        "acquirer": first_org(clause_body_any(text, ACQUIRER_HINTS)),
         "source_document_refs": [doc_id],
         "provenance": (
             f"AZIPI message {index_row['azipi_message_id']} "
@@ -179,7 +210,16 @@ def main() -> int:
         for line in args.index.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    rows = [row for row in (build_row(r, args.documents) for r in index_rows) if row]
+    in_family = [r for r in index_rows if r["azipi_type_code"] in IN_FAMILY_TYPE_CODES]
+    out_of_family = [r for r in index_rows if r["azipi_type_code"] not in IN_FAMILY_TYPE_CODES]
+    rows = [row for row in (build_row(r, args.documents) for r in in_family) if row]
+
+    if out_of_family:
+        excluded_path = args.out.with_name("out_of_family.jsonl")
+        with excluded_path.open("w", encoding="utf-8") as handle:
+            for r in out_of_family:
+                handle.write(json.dumps(r, ensure_ascii=False) + "\n")
+        print(f"excluded {len(out_of_family)} out-of-family rows -> {excluded_path}")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", encoding="utf-8") as handle:
