@@ -8,8 +8,16 @@ is untradeable for this thesis no matter how sound the legal mechanism is.
 Matching is by issuer INN against MOEX's own securities reference (ISS API
 exposes `emitent_inn`), so it is an exact join rather than name similarity.
 
-Reads the inventory and its AZIPI index, writes a CSV of the matched events
-and prints the headline split.
+The INN comes from each document's own title line, not from
+azipi_index.jsonl: found 2026-08-27 that AZIPI's search-results page
+mispairs the ИНН/issuer caption with the wrong link for ~70% of rows (a
+template bug on their side, reproducible — see
+scripts/validate_azipi_documents.py), so the index's `inn` field cannot be
+trusted for this join. The document a link points to is authoritative about
+itself.
+
+Reads the inventory and its downloaded documents, writes a CSV of the
+matched events and prints the headline split.
 """
 
 from __future__ import annotations
@@ -18,6 +26,7 @@ import argparse
 import collections
 import csv
 import json
+import re
 import time
 import urllib.request
 from pathlib import Path
@@ -28,6 +37,19 @@ ISS_SECURITIES = (
 )
 PAGE_DELAY_SECONDS = 0.4
 MAX_PAGES = 60
+
+# Same pattern as scripts/build_e1_inventory.py's _TITLE_RE / document_identity —
+# the document's own declared identity, not the index row.
+_TITLE_RE = re.compile(r"^(?P<issuer>.+?)\s*\(ИНН:\s*(?P<inn>\d+)\)\s*/")
+STUB_MARKER = "Список сообщений"
+
+
+def document_inn(text: str) -> str | None:
+    first_line = text.splitlines()[0].strip() if text.strip() else ""
+    if not first_line or STUB_MARKER in first_line:
+        return None
+    match = _TITLE_RE.match(first_line)
+    return match.group("inn") if match else None
 
 
 def fetch_moex_shares() -> list[dict]:
@@ -48,7 +70,7 @@ def fetch_moex_shares() -> list[dict]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inventory", type=Path, required=True)
-    parser.add_argument("--index", type=Path, required=True)
+    parser.add_argument("--documents", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
@@ -59,11 +81,6 @@ def main() -> int:
         if inn:
             by_inn[inn].append(share)
 
-    index = {
-        json.loads(line)["azipi_message_id"]: json.loads(line)
-        for line in args.index.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    }
     events = [
         json.loads(line)
         for line in args.inventory.read_text(encoding="utf-8").splitlines()
@@ -71,10 +88,15 @@ def main() -> int:
     ]
 
     matched: list[dict] = []
-    listed = unlisted = 0
+    listed = unlisted = no_inn = 0
     for event in events:
-        message_id = event["event_id"].rsplit("-", 1)[-1]
-        inn = index[message_id]["inn"]
+        doc_id = event["source_document_refs"][0]
+        text_path = args.documents / event["event_id"] / f"{doc_id}.txt"
+        text = text_path.read_text(encoding="utf-8") if text_path.is_file() else ""
+        inn = document_inn(text)
+        if inn is None:
+            no_inn += 1
+            continue
         securities = by_inn.get(inn, [])
         if not securities:
             unlisted += 1
@@ -104,6 +126,7 @@ def main() -> int:
     distinct_events = len({row["event_id"] for row in matched})
     print(f"MOEX shares reference: {len(shares)} securities, {len(by_inn)} issuer INNs")
     print(f"inventory events:      {total}")
+    print(f"  no readable ИНН in own document: {no_inn}  ({no_inn * 100 // total}%)")
     print(f"  issuer listed on MOEX:      {listed}  ({listed * 100 // total}%)")
     print(f"  issuer absent from MOEX:    {unlisted}  ({unlisted * 100 // total}%)")
     print(f"  distinct tradable events:   {distinct_events}")

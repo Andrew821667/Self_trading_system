@@ -40,6 +40,18 @@ DOCUMENT_DERIVED_FIELDS = ("isin", "procedure_price", "price_basis", "guarantor_
 IN_FAMILY_TYPE_CODES = frozenset({"1079963", "1079964", "1079967", "1079969"})
 
 _ISIN_RE = re.compile(r"\b(RU[A-Z0-9]{10})\b")
+# First line of every AZIPI document: "Эмитент (ИНН: X) / Тип сообщения - дата".
+# Found 2026-08-27 (scripts/validate_azipi_documents.py): AZIPI's own
+# search-results page mispairs the ИНН/issuer caption with the wrong link for
+# roughly 70% of rows — a template bug on their side, reproducible and stable,
+# confirmed by refetching the same message URL twice. The document a link
+# points to is authoritative about itself; the search-listing caption next to
+# that link is not. issuer/announcement_date are therefore read from the
+# document's own declared identity below, never from azipi_index.jsonl.
+_TITLE_RE = re.compile(
+    r"^(?P<issuer>.+?)\s*\(ИНН:\s*(?P<inn>\d+)\)\s*/\s*.+?\s*-\s*(?P<date>\d{2}\.\d{2}\.\d{4})\s*$"
+)
+STUB_MARKER = "Список сообщений"
 _CLAUSE_RE = re.compile(r"^\s*(\d+\.\d+)\.?\s*(.+)$")
 
 # Two wordings occur: the offer template ("лицо, направившее добровольное ...
@@ -156,15 +168,37 @@ def to_iso(russian_date: str) -> str | None:
     return f"{year}-{month}-{day}"
 
 
+def document_identity(text: str) -> tuple[str, str, str] | None:
+    """(issuer, inn, iso_date) from the document's own title line, or None
+    for a stub page / unparseable title. See _TITLE_RE above for why this,
+    and not the index row, is what issuer/announcement_date come from."""
+    first_line = text.splitlines()[0].strip() if text.strip() else ""
+    if not first_line or STUB_MARKER in first_line:
+        return None
+    match = _TITLE_RE.match(first_line)
+    if not match:
+        return None
+    iso_date = to_iso(match.group("date"))
+    if iso_date is None:
+        return None
+    return match.group("issuer").strip(), match.group("inn"), iso_date
+
+
 def build_row(index_row: dict, documents_dir: Path) -> dict | None:
     event_id = f"e1-azipi-{index_row['azipi_message_id']}"
     doc_id = f"azipi-{index_row['azipi_message_id']}"
     text_path = documents_dir / event_id / f"{doc_id}.txt"
-    announcement = to_iso(index_row["event_date"]) or to_iso(index_row["published_at"])
-    if announcement is None:
-        return None
-
     text = text_path.read_text(encoding="utf-8") if text_path.is_file() else ""
+
+    identity = document_identity(text)
+    if identity is None:
+        # A stub page (AZIPI served its generic listing instead of the real
+        # message) or a title line this pattern cannot read. Either way there
+        # is no self-declared identity to trust, so the event is not built —
+        # see unusable_documents.jsonl in main() for where these go instead.
+        return None
+    issuer, _inn, announcement = identity
+
     price_clause = clause_body(text, PRICE_HINT)
 
     procedure_price: str | None = None
@@ -179,7 +213,7 @@ def build_row(index_row: dict, documents_dir: Path) -> dict | None:
     row: dict = {
         "event_id": event_id,
         "event_type": index_row["event_type"],
-        "issuer": index_row["issuer"],
+        "issuer": issuer,
         "announcement_date": announcement,
         "isin": isin_match.group(1) if isin_match else None,
         "procedure_price": procedure_price,
@@ -189,7 +223,9 @@ def build_row(index_row: dict, documents_dir: Path) -> dict | None:
         "source_document_refs": [doc_id],
         "provenance": (
             f"AZIPI message {index_row['azipi_message_id']} "
-            f"(type {index_row['azipi_type_code']}: {index_row['message_title']})"
+            f"(type {index_row['azipi_type_code']}: {index_row['message_title']}); "
+            "issuer/date read from the document's own title line, not from "
+            "azipi_index.jsonl — see scripts/validate_azipi_documents.py"
         ),
     }
     row["pending_fields"] = sorted(
@@ -212,7 +248,19 @@ def main() -> int:
     ]
     in_family = [r for r in index_rows if r["azipi_type_code"] in IN_FAMILY_TYPE_CODES]
     out_of_family = [r for r in index_rows if r["azipi_type_code"] not in IN_FAMILY_TYPE_CODES]
-    rows = [row for row in (build_row(r, args.documents) for r in in_family) if row]
+    built = [(r, build_row(r, args.documents)) for r in in_family]
+    rows = [row for _r, row in built if row is not None]
+    unusable = [r for r, row in built if row is None]
+
+    if unusable:
+        unusable_path = args.out.with_name("unusable_documents.jsonl")
+        with unusable_path.open("w", encoding="utf-8") as handle:
+            for r in unusable:
+                handle.write(json.dumps(r, ensure_ascii=False) + "\n")
+        print(
+            f"excluded {len(unusable)} rows with no trustworthy document identity "
+            f"(stub page or unparseable title) -> {unusable_path}"
+        )
 
     if out_of_family:
         excluded_path = args.out.with_name("out_of_family.jsonl")
