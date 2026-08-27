@@ -106,21 +106,32 @@ egrul.nalog.gov.ru
 | 184 | Поступление эмитенту уведомления о праве требовать выкупа эмиссионных ценных бумаг эмитента |
 | 185 | Поступление эмитенту требования о выкупе эмиссионных ценных бумаг эмитента |
 
-## Один раз: забрать проект на машину
+## Запуск — один блок, работает на любой машине
+
+Клонирует, если проекта ещё нет; обновляет, если есть. Копировать целиком:
 
 ```sh
-cd ~
-git clone -b claude/new-project-spec-wx4utz https://github.com/Andrew821667/Self_trading_system.git
-cd Self_trading_system
-python3 -m venv .venv && source .venv/bin/activate
+cd ~ && [ -d Self_trading_system ] || git clone -b claude/new-project-spec-wx4utz https://github.com/Andrew821667/Self_trading_system.git
+cd ~/Self_trading_system && git pull
+[ -d .venv ] || python3 -m venv .venv
+source .venv/bin/activate
+python scripts/owner/collect_interfax.py
 ```
 
-`python3`, а не `python` — на macOS второго обычно просто нет. `venv` нужен
-потому, что системный Python на свежих macOS запрещает `pip install` в себя
-(`externally-managed-environment`), и скрипт упал бы на установке playwright.
+Две вещи, на которых легко споткнуться, и обе — про macOS:
 
-Возвращаться в проект потом:
-`cd ~/Self_trading_system && source .venv/bin/activate`.
+- **`python3`, а не `python`.** Голого `python` в macOS нет; он появляется
+  только внутри активированного venv — поэтому в последней строке уже
+  `python`, а в третьей ещё `python3`.
+- **venv обязателен.** Системный Python на свежих macOS запрещает
+  `pip install` в себя (`externally-managed-environment`), и установка
+  playwright упала бы.
+
+В новом окне терминала venv надо активировать заново:
+
+```sh
+cd ~/Self_trading_system && source .venv/bin/activate && python scripts/owner/collect_interfax.py
+```
 
 ## Как это работает: ведёшь ты, скрипт записывает
 
