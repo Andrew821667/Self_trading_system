@@ -37,7 +37,15 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-CLAUSE_RE = re.compile(r"(?=(\d+\.\d+)\.\s)")
+# Нумерация пункта: "1.8." в шапке и "2.6" в теле — точка после второго числа
+# ставится не всегда, и в одном и том же документе по-разному. Требование
+# точки склеивало весь раздел 2 в один пункт, и тогда «дата наступления
+# события» отвечала первым, что нашлось после ближайшего двоеточия, — у
+# Русполимета это была дата госрегистрации выпуска 15.12.2005.
+# Лишние условия: номер начинается после пробела (иначе «07.2020. » из даты
+# читается как номер пункта) и первое число однозначное (иначе «20.1 устава»
+# внутри 2.9 рвёт пункт пополам).
+CLAUSE_RE = re.compile(r"(?<![^\s])([1-9]\.\d{1,2})\.?(?=\s)")
 # "RU 0009084214" — в этих документах ISIN пишут с пробелом после RU.
 ISIN_RE = re.compile(r"\b(RU\s?[A-Z0-9]{10})\b")
 INN_RE = re.compile(r"\b(\d{10}|\d{12})\b")
@@ -52,25 +60,70 @@ PRICE_RE = re.compile(
     r"[^\d]{0,25}(?:(\d{1,2})\s*(?:\([^)]*\))?\s*коп)?",
     re.IGNORECASE,
 )
+KOPECK_ONLY_RE = re.compile(r"(\d{1,2})\s*(?:\([^)]*\))?\s*копе", re.IGNORECASE)
+# "1,89 (один рубль восемьдесят девять копеек) за одну акцию" — слова "рубль"
+# рядом с цифрами нет вовсе, оно только внутри расшифровки прописью.
+PRICE_PAREN_RE = re.compile(r"(\d[\d\s ]*(?:[.,]\d{1,6})?)\s*\([^)]*рубл[^)]*\)", re.IGNORECASE)
+# Вытеснение по ст. 84.8 в ПАО МОСОБЛБАНК после санации: цена выкупа записана
+# дробью — "1 / 4 507 984 112 (...доля) рубля за 1 (одну) акцию". Это не сбой
+# распознавания, а действительная цена: акции после докапитализации стоят
+# околонулевую долю рубля. Без этой ветки поле осталось бы пустым и правило D
+# чек-листа выбросило бы законное событие как «неполные данные».
+PRICE_FRACTION_RE = re.compile(r"(\d[\d\s ]*)\s*/\s*(\d[\d\s ]*)\s*\([^)]*\)\s*рубл", re.IGNORECASE)
 EMPTY = ("не применимо", "отсутствует", "нет", "-", "—")
 
-ISSUER_HINT = "полное фирменное наименование эмитента"
-INN_HINT = "инн эмитента"
-EVENT_DATE_HINTS = ("дата наступления события",)
+# Дату пишут и цифрами, и прописью — "14 декабря 2020 года", "02 июня 2020 г."
+# — причём в одном документе в шапке одно, в пункте 2.4 другое. Два сообщения
+# из 33 остались без даты именно поэтому.
+MONTHS = {
+    m: i
+    for i, m in enumerate(
+        (
+            "январ",
+            "феврал",
+            "март",
+            "апрел",
+            "мая",
+            "июн",
+            "июл",
+            "август",
+            "сентябр",
+            "октябр",
+            "ноябр",
+            "декабр",
+        ),
+        start=1,
+    )
+}
+WORD_DATE_RE = re.compile(
+    r"\b(\d{1,2})\s+(" + "|".join(MONTHS) + r")[а-я]*\s+(\d{4})", re.IGNORECASE
+)
+
+# Шаблон сообщения существует минимум в двух редакциях, и расходятся они не
+# только нумерацией пунктов, но и формулировками. В ранней ИНН стоит как
+# "ИНН эмитента", в поздней — "Идентификационный номер налогоплательщика
+# (ИНН) эмитента (при наличии)"; наименование в поздней разорвано вставкой
+# "(для коммерческой организации) или наименование (для некоммерческой
+# организации)". На подстроках 12 документов из 33 не разобрались вовсе,
+# поэтому подсказки — шаблоны.
+ISSUER_HINT = re.compile(r"полное фирменное наименование.{0,90}эмитента", re.IGNORECASE)
+INN_HINT = re.compile(
+    r"(?:идентификационный номер налогоплательщика|\bинн\b).{0,30}эмитента", re.IGNORECASE
+)
+EVENT_DATE_HINTS = (re.compile(r"дата наступления события", re.IGNORECASE),)
 PRICE_HINTS = (
-    "цена выкупаемых ценных бумаг",
-    "цена приобретаемых ценных бумаг",
-    "цена приобретения",
-    "цена, по которой",
+    re.compile(r"цена\s+(?:выкупаемых|приобретаемых|приобретения)", re.IGNORECASE),
+    re.compile(r"предлагаемая цена", re.IGNORECASE),
+    re.compile(r"цена,\s+по которой", re.IGNORECASE),
 )
 ACQUIRER_HINTS = (
-    "направившего требование о выкупе",
-    "направившего добровольное",
-    "направившего обязательное",
-    "направившего уведомление",
+    re.compile(
+        r"направившего\s+(?:требование о выкупе|добровольное|обязательное|уведомление)",
+        re.IGNORECASE,
+    ),
 )
-GUARANTOR_HINT = "гаранта, предоставившего банковскую гарантию"
-RECEIVED_HINTS = ("дата получения эмитентом",)
+GUARANTOR_HINT = re.compile(r"гаранта,\s+предоставившего банковскую гарантию", re.IGNORECASE)
+RECEIVED_HINTS = (re.compile(r"дата получения эмитентом", re.IGNORECASE),)
 
 
 def read_page(path: Path) -> str:
@@ -99,7 +152,7 @@ def clauses(text: str) -> list[tuple[str, str]]:
 NOT_APPLICABLE = "не применимо"
 
 
-def clause_with(items: list[tuple[str, str]], *hints: str) -> str | None:
+def clause_with(items: list[tuple[str, str]], *hints: re.Pattern[str]) -> str | None:
     """Ответ пункта; NOT_APPLICABLE, если пункт есть и явно говорит «не применимо».
 
     Разница существенна для классификации: у вытеснения по ст. 84.8
@@ -109,16 +162,19 @@ def clause_with(items: list[tuple[str, str]], *hints: str) -> str | None:
     отсеется по ошибке. Отсутствие требования и отсутствие данных — разное.
     """
     for _num, body in items:
-        low = body.lower()
-        if any(h in low for h in hints):
-            # Ответ отделяют и двоеточием, и точкой с запятой — в шаблоне
-            # требования о выкупе пункт 2.1 идёт через ";", и разбор только
-            # по ":" терял приобретателя целиком.
-            cut = min(
-                (body.index(c) for c in ":;" if c in body),
-                default=-1,
-            )
-            answer = body[cut + 1 :] if cut >= 0 else ""
+        match = next((h.search(body) for h in hints if h.search(body)), None)
+        if match:
+            # Ответ отделяют двоеточием, точкой с запятой — или ничем: в части
+            # шаблонов он просто идёт следом за вопросом. Разбор только по ":"
+            # терял приобретателя у требований о выкупе, а отсутствие
+            # разделителя роняло пять документов целиком.
+            # Разделитель ищется после вопроса, а не в начале пункта: в
+            # пункте 2.1 двоеточие стоит и внутри перечисления реквизитов.
+            tail = body[match.start() :]
+            cut = min((tail.index(c) for c in ":;" if c in tail), default=-1)
+            answer = tail[cut + 1 :] if cut >= 0 else body[match.end() :]
+            # Хвост вопроса бывает в скобках: "...эмитента (при наличии) 7104002774".
+            answer = re.sub(r"^\s*(?:\([^)]*\)\s*)+", "", answer)
             answer = answer.strip(" ;.-—")
             if not answer:
                 continue
@@ -129,17 +185,64 @@ def clause_with(items: list[tuple[str, str]], *hints: str) -> str | None:
     return None
 
 
-def parse_price(text: str) -> str | None:
-    m = PRICE_RE.search(text)
-    if not m:
+def parse_date(text: str) -> str | None:
+    """ISO-дата из ответа пункта: сперва цифрами, затем прописью."""
+    m = DATE_RE.search(text)
+    if m:
+        d, mo, y = m.group(1).split(".")
+        return f"{y}-{mo}-{d}"
+    w = WORD_DATE_RE.search(text)
+    if not w:
         return None
+    month = MONTHS[next(k for k in MONTHS if w.group(2).lower().startswith(k))]
+    return f"{w.group(3)}-{month:02d}-{int(w.group(1)):02d}"
+
+
+def _number(raw: str) -> Decimal | None:
     try:
-        value = Decimal(re.sub(r"[\s ]", "", m.group(1)).replace(",", "."))
+        return Decimal(re.sub(r"[\s  ]", "", raw).replace(",", "."))
     except InvalidOperation:
         return None
-    if m.group(2):
-        value += Decimal(m.group(2)) / 100
-    return str(value) if 0 < value < Decimal(10_000_000) else None
+
+
+def parse_price(text: str) -> str | None:
+    frac = PRICE_FRACTION_RE.search(text)
+    if frac:
+        num, den = _number(frac.group(1)), _number(frac.group(2))
+        if num is None or not den:
+            return None
+        # Копеечная точность тут бессмысленна, а деление даёт 28 значащих
+        # цифр и запись через E, которую ниже по конвейеру никто не ждёт.
+        return format((num / den).quantize(Decimal("1E-10")).normalize(), "f")
+
+    m = PRICE_RE.search(text)
+    if m:
+        value = _number(m.group(1))
+        if value is None:
+            return None
+        # Копейки прибавляются, только если рубли записаны целым числом.
+        # "0,75 рубля (75 копеек)" — это одна и та же цена, названная дважды;
+        # сложение давало 1,50, то есть ровно вдвое завышало цену выкупа.
+        if m.group(2) and value == value.to_integral_value():
+            value += Decimal(m.group(2)) / 100
+        return format(value, "f") if 0 < value < Decimal(10_000_000) else None
+
+    par = PRICE_PAREN_RE.search(text)
+    if par:
+        value = _number(par.group(1))
+        if value is not None and 0 < value < Decimal(10_000_000):
+            return format(value, "f")
+    # Цена ниже рубля пишется вообще без рублей: «61 (шестьдесят одна)
+    # копейка за 1 (одну) акцию». Копеечные номиналы на этом рынке не
+    # экзотика — у Русполимета в 2020 акция стоила меньше рубля, — и без
+    # этой ветки такое предложение молча оставалось без цены.
+    k = KOPECK_ONLY_RE.search(text)
+    if not k:
+        return None
+    try:
+        return format(Decimal(k.group(1)) / 100, "f")
+    except InvalidOperation:
+        return None
 
 
 def build(path: Path) -> dict | None:
@@ -149,8 +252,10 @@ def build(path: Path) -> dict | None:
         return None
 
     issuer = clause_with(items, ISSUER_HINT)
-    inn_body = clause_with(items, INN_HINT)
-    inn = INN_RE.search(inn_body) if inn_body else None
+    # ИНН ищется во всём пункте, а не в «ответе»: разделителя может не быть
+    # вовсе, а десяти- или двенадцатизначное число в этом пункте одно.
+    inn_clause = next((b for _n, b in items if INN_HINT.search(b)), None)
+    inn = INN_RE.search(inn_clause) if inn_clause else None
     if not (issuer and inn):
         return None
 
@@ -158,18 +263,13 @@ def build(path: Path) -> dict | None:
     guarantor = clause_with(items, GUARANTOR_HINT)
     acquirer = clause_with(items, *ACQUIRER_HINTS)
     date_body = clause_with(items, *EVENT_DATE_HINTS) or clause_with(items, *RECEIVED_HINTS)
-    date_m = DATE_RE.search(date_body) if date_body else None
     isin_m = ISIN_RE.search(text)
 
     row = {
         "event_id": f"e1-ix-{path.stem}",
         "issuer": re.sub(r"\s+", " ", issuer).strip(),
         "inn": inn.group(1),
-        "announcement_date": (
-            f"{date_m.group(1)[6:]}-{date_m.group(1)[3:5]}-{date_m.group(1)[:2]}"
-            if date_m
-            else None
-        ),
+        "announcement_date": parse_date(date_body) if date_body else None,
         "isin": isin_m.group(1).replace(" ", "") if isin_m else None,
         "procedure_price": parse_price(price_body) if price_body else None,
         "guarantor_bank": guarantor,
