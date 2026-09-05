@@ -29,9 +29,10 @@ import re
 import socket
 import sys
 import time
+import urllib.parse
 import urllib.request
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 
 socket.setdefaulttimeout(60)
@@ -40,6 +41,7 @@ ISS_HISTORY = (
     "https://iss.moex.com/iss/history/engines/stock/markets/shares/securities/{secid}.json"
     "?iss.meta=off&from={start}&till={end}&limit=100"
 )
+ISS_SEARCH = "https://iss.moex.com/iss/securities.json?q={query}&iss.meta=off"
 REQUEST_DELAY_SECONDS = 0.3
 MAX_ATTEMPTS = 3
 
@@ -52,17 +54,6 @@ MAX_PLAUSIBLE_RATIO = 5.0
 PRICE_HINT = "цена приобрет"
 # "0,00289 рублей" — kopeck-fraction prices are real in this family, so the
 # decimal tail must not be capped at two digits.
-# Prices come in two shapes and both must be read whole:
-#   "0,00289 (ноль целых ...) рублей"            -> decimal tail
-#   "160 (сто шестьдесят) руб. 70 коп."          -> kopecks AFTER the word
-# Reading only the rouble part turns 160.70 into 160, which silently biases
-# every spread computed from it. The kopeck form is tried first: making that
-# group optional inside one pattern lets the lazy match skip it every time.
-_ROUBLES = r"(\d[\d\s  ]*(?:[.,]\d{1,6})?)\s*(?:\([^)]*\))?\s*(?:руб|рубл|₽)"
-_PRICE_WITH_KOPECKS_RE = re.compile(
-    _ROUBLES + r"[^\d]{0,15}(\d{1,2})\s*(?:\([^)]*\))?\s*коп", re.IGNORECASE
-)
-_PRICE_RE = re.compile(_ROUBLES, re.IGNORECASE)
 # The target is named right after the price: "за одну обыкновенную акцию X".
 _TARGET_RE = re.compile(
     r"(?:за\s+(?:1|одну)\s*\(?[^)]*\)?\s*(?:обыкновенн|привилегированн)[^\s]*\s+"
@@ -93,7 +84,48 @@ def fetch_json(url: str) -> dict | None:
     return None
 
 
-def close_before(secid: str, day: date) -> float | None:
+_ALIASES: dict[str, list[str]] = {}
+
+
+def aliases(regnumber: str) -> list[str]:
+    """Тикеры, под которыми торговался один и тот же выпуск.
+
+    Тикер меняется при переименовании эмитента, а история остаётся под
+    старым: выпуск 1-01-50077-A торговался как OGKE («Энел Россия»), потом
+    ENRU, и только с 29.03.2023 — как ELFV. Справочник MOEX отдаёт по ИНН
+    текущий тикер, у которого истории на дату события 09.01.2023 нет вовсе,
+    и событие молча выпадало из выборки как «нет рыночных данных». Между тем
+    данные есть — под другим именем той же бумаги.
+
+    Ключ поиска — государственный регистрационный номер выпуска: он у бумаги
+    один на всю жизнь, в отличие от тикера.
+    """
+    if regnumber in _ALIASES:
+        return _ALIASES[regnumber]
+    payload = fetch_json(ISS_SEARCH.format(query=urllib.parse.quote(regnumber)))
+    time.sleep(REQUEST_DELAY_SECONDS)
+    found: list[str] = []
+    if payload:
+        block = payload.get("securities", {})
+        for row in block.get("data", []):
+            item = dict(zip(block["columns"], row, strict=True))
+            if item.get("regnumber") == regnumber and item.get("secid"):
+                found.append(str(item["secid"]))
+    _ALIASES[regnumber] = found
+    return found
+
+
+def close_before(secid: str, day: date) -> tuple[float | None, str]:
+    """(последняя цена закрытия до даты события, что именно выяснилось).
+
+    Три исхода различаются намеренно. «Торговых дней не было ни одного» и
+    «торговые дни были, но сделок в них не было» — не одно и то же: первое
+    означает, что мы смотрим не туда (переименование, другой рынок), второе
+    само по себе ответ на признак Д-7 чек-листа (ликвидность не пропускает
+    позицию). У Косогорского завода перед предложением 29.10.2021 в
+    справочнике 23 торговых дня подряд с VOLUME=0 — позицию там не собрать
+    ни за какие деньги, и это факт о событии, а не пробел в данных.
+    """
     payload = fetch_json(
         ISS_HISTORY.format(
             secid=secid, start=(day - timedelta(days=30)).isoformat(), end=day.isoformat()
@@ -101,11 +133,15 @@ def close_before(secid: str, day: date) -> float | None:
     )
     time.sleep(REQUEST_DELAY_SECONDS)
     if not payload:
-        return None
+        return None, "iss_unavailable"
     block = payload.get("history", {})
     bars = [dict(zip(block["columns"], row, strict=True)) for row in block.get("data", [])]
+    if not bars:
+        return None, "no_history_rows"
     closes = [bar["CLOSE"] for bar in bars if bar.get("CLOSE")]
-    return float(closes[-1]) if closes else None
+    if not closes:
+        return None, "no_trades_in_window"
+    return float(closes[-1]), "ok"
 
 
 def price_clause(text: str) -> str | None:
@@ -113,17 +149,6 @@ def price_clause(text: str) -> str | None:
         if PRICE_HINT in line.lower() and re.search(r"\d", line):
             return re.sub(r"\s+", " ", line).strip()
     return None
-
-
-def parse_price(roubles: str, kopecks: str | None) -> Decimal | None:
-    cleaned = re.sub(r"[\s  ]", "", roubles).replace(",", ".")
-    try:
-        value = Decimal(cleaned)
-    except InvalidOperation:
-        return None
-    if kopecks:
-        value += Decimal(kopecks) / 100
-    return value if value > 0 else None
 
 
 def main() -> int:
@@ -158,15 +183,18 @@ def main() -> int:
         if not clause:
             continue
 
-        with_kopecks = _PRICE_WITH_KOPECKS_RE.search(clause)
-        price_match = with_kopecks or _PRICE_RE.search(clause)
-        if not price_match:
+        # Цена берётся из инвентаря, а не разбирается здесь заново. Раньше
+        # этот скрипт читал её своими шаблонами — то есть в проекте жили две
+        # независимые реализации разбора цены, и расходились они молча.
+        # Разбор 2026-09-05 нашёл в этой семье шаблонов четыре ошибки
+        # (удвоение копеек из расшифровки прописью, цена без слова «рубль»,
+        # дробная цена, дата прописью); чинить их пришлось бы дважды, а
+        # заметить расхождение — никак. Инвентарь — единственный источник
+        # цены; здесь остаётся только то, чего в инвентаре нет: какой
+        # компании адресовано предложение.
+        if not event.get("procedure_price"):
             continue
-        price = parse_price(
-            price_match.group(1), price_match.group(2) if with_kopecks else None
-        )
-        if price is None:
-            continue
+        price = Decimal(event["procedure_price"])
 
         # When the clause names a company after the price, the offer concerns
         # *that* company's shares — a holding disclosing about a subsidiary.
@@ -190,6 +218,7 @@ def main() -> int:
                     "target_named_in_document": target_name,
                     "target_source": "document" if target_from_document else "filer",
                     "secid": "",
+                    "secid_in_reference_book": "",
                     "procedure_price": str(price),
                     "market_close_before": "",
                     "price_to_market": "",
@@ -199,10 +228,29 @@ def main() -> int:
             continue
 
         for security in candidates:
-            market = close_before(security["secid"], date.fromisoformat(event["announcement_date"]))
+            day = date.fromisoformat(event["announcement_date"])
+            used_secid = security["secid"]
+            market, why = close_before(used_secid, day)
+            # Истории под текущим тикером нет — значит, на дату события бумага
+            # звалась иначе. Пробуем остальные тикеры того же выпуска.
+            if why == "no_history_rows" and security.get("regnumber"):
+                for alias in aliases(str(security["regnumber"])):
+                    if alias == used_secid:
+                        continue
+                    market, why = close_before(alias, day)
+                    if why != "no_history_rows":
+                        used_secid = alias
+                        break
+
             ratio = float(price) / market if market else None
             if ratio is None:
-                status = "no_pre_event_market_data"
+                # "нет данных" и "торгов не было" различаются: второе — сам по
+                # себе ответ про ликвидность, а не пробел в сборе.
+                status = (
+                    "no_trades_before_event"
+                    if why == "no_trades_in_window"
+                    else "no_pre_event_market_data"
+                )
             elif MIN_PLAUSIBLE_RATIO <= ratio <= MAX_PLAUSIBLE_RATIO:
                 status = "ok"
             else:
@@ -214,7 +262,8 @@ def main() -> int:
                     "filer": event["issuer"],
                     "target_named_in_document": target_name,
                     "target_source": "document" if target_from_document else "filer",
-                    "secid": security["secid"],
+                    "secid": used_secid,
+                    "secid_in_reference_book": security["secid"],
                     "procedure_price": str(price),
                     "market_close_before": market if market else "",
                     "price_to_market": round(ratio, 3) if ratio else "",
@@ -224,7 +273,8 @@ def main() -> int:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(results[0]))
+        columns = list({key: None for row in results for key in row})
+        writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         writer.writerows(sorted(results, key=lambda r: r["announcement_date"]))
 
@@ -232,7 +282,15 @@ def main() -> int:
     print(f"documents with a readable price clause and a named target: {len(results)}")
     print(f"  target resolved to a MOEX security and price plausible: {len(usable)}")
     print(f"  target not listed on MOEX: {sum(1 for r in results if r['status'] == 'target_not_listed_on_moex')}")
-    print(f"  implausible price/market ratio: {sum(1 for r in results if r['status'] == 'implausible_ratio')}")
+    print(
+        f"  implausible price/market ratio: {sum(1 for r in results if r['status'] == 'implausible_ratio')}"
+    )
+    renamed = sum(1 for r in results if r["secid"] and r["secid"] != r["secid_in_reference_book"])
+    print(
+        "  no trades at all in the 30 days before the event (a liquidity fact, not a gap): "
+        f"{sum(1 for r in results if r['status'] == 'no_trades_before_event')}"
+    )
+    print(f"  history found under the security's earlier ticker: {renamed}")
     print(f"wrote {args.out}")
     return 0
 

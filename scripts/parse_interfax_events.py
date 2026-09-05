@@ -35,8 +35,9 @@ import json
 import plistlib
 import re
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+from document_facts import parse_date, parse_price, price_basis_of
 
 # Нумерация пункта: "1.8." в шапке и "2.6" в теле — точка после второго числа
 # ставится не всегда, и в одном и том же документе по-разному. Требование
@@ -50,56 +51,7 @@ CLAUSE_RE = re.compile(r"(?<![^\s])([1-9]\.\d{1,2})\.?(?=\s)")
 # "RU 0009084214" — в этих документах ISIN пишут с пробелом после RU.
 ISIN_RE = re.compile(r"\b(RU\s?[A-Z0-9]{10})\b")
 INN_RE = re.compile(r"\b(\d{10}|\d{12})\b")
-DATE_RE = re.compile(r"\b(\d{2}\.\d{2}\.\d{4})\b")
-# Копейки пишут двумя способами, и оба встречаются в одном наборе из трёх
-# документов: "481 (Четыреста восемьдесят один) рубль 68 копеек" и
-# "234 (двести тридцать четыре) рубля 75 (семьдесят пять) копеек" — во втором
-# между числом копеек и словом стоит расшифровка прописью. Без неё в шаблоне
-# 234,75 превращалось в 234, то есть цена занижалась молча.
-PRICE_RE = re.compile(
-    r"(\d[\d\s ]*(?:[.,]\d{1,6})?)\s*(?:\([^)]*\))?\s*(?:руб|рубл|₽)"
-    r"[^\d]{0,25}(?:(\d{1,2})\s*(?:\([^)]*\))?\s*коп)?",
-    re.IGNORECASE,
-)
-KOPECK_ONLY_RE = re.compile(r"(\d{1,2})\s*(?:\([^)]*\))?\s*копе", re.IGNORECASE)
-# "1,89 (один рубль восемьдесят девять копеек) за одну акцию" — слова "рубль"
-# рядом с цифрами нет вовсе, оно только внутри расшифровки прописью.
-PRICE_PAREN_RE = re.compile(r"(\d[\d\s ]*(?:[.,]\d{1,6})?)\s*\([^)]*рубл[^)]*\)", re.IGNORECASE)
-# Вытеснение по ст. 84.8 в ПАО МОСОБЛБАНК после санации: цена выкупа записана
-# дробью — "1 / 4 507 984 112 (...доля) рубля за 1 (одну) акцию". Это не сбой
-# распознавания, а действительная цена: акции после докапитализации стоят
-# околонулевую долю рубля. Без этой ветки поле осталось бы пустым и правило D
-# чек-листа выбросило бы законное событие как «неполные данные».
-PRICE_FRACTION_RE = re.compile(r"(\d[\d\s ]*)\s*/\s*(\d[\d\s ]*)\s*\([^)]*\)\s*рубл", re.IGNORECASE)
 EMPTY = ("не применимо", "отсутствует", "нет", "-", "—")
-
-# Дату пишут и цифрами, и прописью — "14 декабря 2020 года", "02 июня 2020 г."
-# — причём в одном документе в шапке одно, в пункте 2.4 другое. Два сообщения
-# из 33 остались без даты именно поэтому.
-MONTHS = {
-    m: i
-    for i, m in enumerate(
-        (
-            "январ",
-            "феврал",
-            "март",
-            "апрел",
-            "мая",
-            "июн",
-            "июл",
-            "август",
-            "сентябр",
-            "октябр",
-            "ноябр",
-            "декабр",
-        ),
-        start=1,
-    )
-}
-WORD_DATE_RE = re.compile(
-    r"\b(\d{1,2})\s+(" + "|".join(MONTHS) + r")[а-я]*\s+(\d{4})", re.IGNORECASE
-)
-
 # Шаблон сообщения существует минимум в двух редакциях, и расходятся они не
 # только нумерацией пунктов, но и формулировками. В ранней ИНН стоит как
 # "ИНН эмитента", в поздней — "Идентификационный номер налогоплательщика
@@ -156,28 +108,12 @@ MESSAGE_TYPES: tuple[tuple[re.Pattern[str], str], ...] = (
         "squeeze_out_request_95",
     ),
 )
-# Формулировки, которыми эмитент объясняет, откуда взялась цена. Совпадают со
-# scripts/build_e1_inventory.py: price_basis должен значить одно и то же в
-# обеих половинах инвентаря, иначе классификация читает разные шкалы.
-PRICE_BASIS_PATTERNS: tuple[tuple[str, str], ...] = (
-    ("средневзвешенн", "биржевая средневзвешенная цена"),
-    ("оценщик", "рыночная стоимость по отчёту оценщика"),
-    ("организатор", "цена по данным организатора торговли"),
-    ("наибольш", "наибольшая из предусмотренных законом величин"),
-)
 
 
 def published_at(text: str) -> str | None:
     """ISO-дата публикации сообщения по штампу портала."""
     m = PUBLISHED_RE.search(text)
     return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
-
-
-def price_basis_of(clause_text: str | None) -> str | None:
-    if not clause_text:
-        return None
-    lowered = clause_text.lower()
-    return next((label for needle, label in PRICE_BASIS_PATTERNS if needle in lowered), None)
 
 
 def read_page(path: Path) -> str:
@@ -264,66 +200,6 @@ def clause_with(items: list[tuple[str, str]], *hints: re.Pattern[str]) -> str | 
             if answer.lower() not in EMPTY:
                 return answer
     return None
-
-
-def parse_date(text: str) -> str | None:
-    """ISO-дата из ответа пункта: сперва цифрами, затем прописью."""
-    m = DATE_RE.search(text)
-    if m:
-        d, mo, y = m.group(1).split(".")
-        return f"{y}-{mo}-{d}"
-    w = WORD_DATE_RE.search(text)
-    if not w:
-        return None
-    month = MONTHS[next(k for k in MONTHS if w.group(2).lower().startswith(k))]
-    return f"{w.group(3)}-{month:02d}-{int(w.group(1)):02d}"
-
-
-def _number(raw: str) -> Decimal | None:
-    try:
-        return Decimal(re.sub(r"[\s  ]", "", raw).replace(",", "."))
-    except InvalidOperation:
-        return None
-
-
-def parse_price(text: str) -> str | None:
-    frac = PRICE_FRACTION_RE.search(text)
-    if frac:
-        num, den = _number(frac.group(1)), _number(frac.group(2))
-        if num is None or not den:
-            return None
-        # Копеечная точность тут бессмысленна, а деление даёт 28 значащих
-        # цифр и запись через E, которую ниже по конвейеру никто не ждёт.
-        return format((num / den).quantize(Decimal("1E-10")).normalize(), "f")
-
-    m = PRICE_RE.search(text)
-    if m:
-        value = _number(m.group(1))
-        if value is None:
-            return None
-        # Копейки прибавляются, только если рубли записаны целым числом.
-        # "0,75 рубля (75 копеек)" — это одна и та же цена, названная дважды;
-        # сложение давало 1,50, то есть ровно вдвое завышало цену выкупа.
-        if m.group(2) and value == value.to_integral_value():
-            value += Decimal(m.group(2)) / 100
-        return format(value, "f") if 0 < value < Decimal(10_000_000) else None
-
-    par = PRICE_PAREN_RE.search(text)
-    if par:
-        value = _number(par.group(1))
-        if value is not None and 0 < value < Decimal(10_000_000):
-            return format(value, "f")
-    # Цена ниже рубля пишется вообще без рублей: «61 (шестьдесят одна)
-    # копейка за 1 (одну) акцию». Копеечные номиналы на этом рынке не
-    # экзотика — у Русполимета в 2020 акция стоила меньше рубля, — и без
-    # этой ветки такое предложение молча оставалось без цены.
-    k = KOPECK_ONLY_RE.search(text)
-    if not k:
-        return None
-    try:
-        return format(Decimal(k.group(1)) / 100, "f")
-    except InvalidOperation:
-        return None
 
 
 def pending_fields(row: dict, items: list[tuple[str, str]], event_type: str) -> list[str]:
@@ -454,7 +330,13 @@ def build(path: Path) -> tuple[dict, str, dict] | None:
     # документов АЗИПИ. Так объединённый инвентарь идёт дальше по конвейеру
     # без развилок «а откуда эта строка пришла».
     ru_date = f"{announcement[8:]}.{announcement[5:7]}.{announcement[:4]}" if announcement else "??"
-    document = f"{row['issuer']} (ИНН: {inn.group(1)}) / {title} - {ru_date}\n{text}\n"
+    # Пункты пишутся по одному в строку — в том же виде, что у документов
+    # АЗИПИ. Это не косметика: scripts/resolve_target_security.py ищет пункт
+    # о цене построчно, и на однострочном документе ему досталась бы вся
+    # страница целиком, вместе с новостной колонкой портала, — а из неё
+    # шаблон «за одну обыкновенную акцию X» может вытащить чужое имя.
+    body = "\n".join(clause_text for _num, clause_text in items) if items else text
+    document = f"{row['issuer']} (ИНН: {inn.group(1)}) / {title} - {ru_date}\n{body}\n"
 
     meta = {
         "doc_id": doc_id,

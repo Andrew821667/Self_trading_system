@@ -72,9 +72,19 @@ def main() -> int:
     parser.add_argument("--inventory", type=Path, required=True)
     parser.add_argument("--documents", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--moex",
+        type=Path,
+        help=(
+            "кэш справочника MOEX (stage-E-1/inventory/moex_securities.json). "
+            "Без него справочник качается с ISS. Кэш — снимок на дату его "
+            "сохранения: is_traded в нём состояние бумаги на тот день, а не "
+            "на дату события, и читать его надо именно так."
+        ),
+    )
     args = parser.parse_args()
 
-    shares = fetch_moex_shares()
+    shares = json.loads(args.moex.read_text(encoding="utf-8")) if args.moex else fetch_moex_shares()
     by_inn: dict[str, list[dict]] = collections.defaultdict(list)
     for share in shares:
         inn = str(share.get("emitent_inn") or "").strip()

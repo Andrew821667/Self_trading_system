@@ -25,8 +25,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+from document_facts import parse_price, price_basis_of
 
 # Fields that can only come from the document body; anything not extracted
 # below is reported as pending under one of these names.
@@ -61,13 +62,6 @@ ACQUIRER_HINTS = ("направившего добровольное", "напр
 PRICE_HINT = "цена приобретаемых ценных бумаг"
 GUARANTOR_HINT = "гаранта, предоставившего банковскую гарантию"
 
-# "3 387 (Три тысячи триста восемьдесят семь) рублей 77 коп." — the digits are
-# separated from "руб" by the amount spelled out in words, and the kopeck part
-# trails after it, so both are captured rather than assumed away.
-_PRICE_VALUE_RE = re.compile(
-    r"(\d[\d\s  ]*(?:[.,]\d{1,2})?)(?:\s*\([^)]*\))?\s*(?:руб|рубл|₽)[^\d]{0,25}(?:(\d{1,2})\s*коп)?",
-    re.IGNORECASE,
-)
 _ORG_RE = re.compile(
     r"((?:Публичное акционерное общество|Акционерное общество|"
     r"Общество с ограниченной ответственностью|ПАО|АО|ООО)"
@@ -77,31 +71,6 @@ _ORG_RE = re.compile(
 # company — "Кустов Илья Михайлович". Treated as an equally valid acquirer
 # rather than dropped as an extraction miss.
 _PERSON_RE = re.compile(r"^([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2})\s*[.,]?\s*$")
-# Phrases issuers use in clause 1.7 to say how the price was arrived at.
-PRICE_BASIS_PATTERNS: tuple[tuple[str, str], ...] = (
-    ("средневзвешенн", "биржевая средневзвешенная цена"),
-    ("оценщик", "рыночная стоимость по отчёту оценщика"),
-    ("организатор", "цена по данным организатора торговли"),
-    ("наибольш", "наибольшая из предусмотренных законом величин"),
-)
-
-
-def parse_price(digits: str, kopecks: str | None) -> Decimal | None:
-    # Russian texts write the decimal separator as a comma ("22,18 рубля");
-    # Decimal only accepts a period and rejects the whole value otherwise.
-    cleaned = re.sub(r"[\s  ]", "", digits).replace(",", ".")
-    try:
-        value = Decimal(cleaned)
-    except InvalidOperation:
-        return None
-    if kopecks:
-        value += Decimal(kopecks) / 100
-    # A per-share procedure price beyond this is not credible for the
-    # third-tier issuers this family lives in, and would signal the pattern
-    # latched onto a share count or a total consideration instead.
-    return value if 0 < value < Decimal(10_000_000) else None
-
-
 EMPTY_ANSWERS = ("отсутствует", "-", "—", "нет", "не применимо")
 
 
@@ -203,16 +172,6 @@ def first_org(value: str | None) -> str | None:
     return person.group(1).strip() if person else None
 
 
-def price_basis_of(clause_text: str | None) -> str | None:
-    if not clause_text:
-        return None
-    lowered = clause_text.lower()
-    for needle, label in PRICE_BASIS_PATTERNS:
-        if needle in lowered:
-            return label
-    return None
-
-
 def to_iso(russian_date: str) -> str | None:
     match = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", russian_date or "")
     if not match:
@@ -254,13 +213,12 @@ def build_row(index_row: dict, documents_dir: Path) -> dict | None:
 
     price_clause = clause_body(text, PRICE_HINT)
 
-    procedure_price: str | None = None
-    if price_clause:
-        match = _PRICE_VALUE_RE.search(price_clause)
-        if match:
-            price = parse_price(match.group(1), match.group(2))
-            if price is not None:
-                procedure_price = str(price)
+    # Разбор цены — общий с разбором «Интерфакса» (scripts/document_facts.py).
+    # Своя реализация здесь читала «0,592 (ноль целых пятьсот девяносто две
+    # тысячных) рубля» как 592: дробная часть была ограничена двумя знаками,
+    # «0,59» под «рубля» не подходило, зато подходило «592» из середины
+    # числа. Ошибка в тысячу раз, и ни одна проверка её не ловила.
+    procedure_price = parse_price(price_clause) if price_clause else None
 
     isin_match = _ISIN_RE.search(text)
     row: dict = {
