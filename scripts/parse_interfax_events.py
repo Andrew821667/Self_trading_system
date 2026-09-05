@@ -373,10 +373,23 @@ def main() -> int:
     built = [(p, build(p)) for p in files]
     unread = [p.name for p, r in built if r is None]
     rows = []
-    for _p, result in built:
+    # Одно и то же сообщение легко сохранить дважды: Safari даёт всем
+    # сохранениям одинаковое имя, и владелец переименовывает их вручную. Имя
+    # файла ни на что не влияет — event_id берётся из кода сообщения внутри
+    # страницы, — но два файла с одним кодом дали бы две одинаковые строки и
+    # уронили бы слияние на проверке уникальности. Дубль отбрасывается здесь
+    # и называется вслух, а не приводит к падению через два шага.
+    seen: dict[str, str] = {}
+    duplicates: list[str] = []
+    for path, result in built:
         if result is None:
             continue
         row, document, meta = result
+        first = seen.get(row["event_id"])
+        if first:
+            duplicates.append(f"{path.name} = {first}")
+            continue
+        seen[row["event_id"]] = path.name
         rows.append(row)
         folder = args.documents / row["event_id"]
         folder.mkdir(parents=True, exist_ok=True)
@@ -409,6 +422,10 @@ def main() -> int:
     print(f"разобрано: {len(rows)}")
     for f, c in filled.items():
         print(f"  {f:18} {c}/{len(rows)}")
+    if duplicates:
+        print(f"дубли одного сообщения ({len(duplicates)}), взят первый:")
+        for pair in duplicates:
+            print(f"  {pair}")
     if unread:
         print(f"не прочитано ({len(unread)}): {', '.join(unread)}")
     print(f"записано -> {args.out}, документы -> {args.documents}")
