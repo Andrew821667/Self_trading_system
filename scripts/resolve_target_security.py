@@ -253,6 +253,7 @@ def main() -> int:
                     "procedure_price": str(price),
                     "market_close_before": "",
                     "price_to_market": "",
+                    "ratio_outside_plausible_range": "",
                     "status": "target_not_listed_on_moex",
                 }
             )
@@ -284,6 +285,19 @@ def main() -> int:
                 )
             elif MIN_PLAUSIBLE_RATIO <= ratio <= MAX_PLAUSIBLE_RATIO:
                 status = "ok"
+            elif not target_from_document:
+                # Бумага найдена по ИНН — точным соединением, а не подбором
+                # имени. Крайнее отношение цены к рынку тут не улика против
+                # матчинга, а настоящий выброс, и выбрасывать его нельзя.
+                #
+                # Живой пример: вытеснение в ПАО МОСОБЛБАНК 02.06.2020 по
+                # цене 1/4 507 984 112 доли рубля при рынке 1,80 ₽ —
+                # практически за ноль. Прежнее правило отвергало эту строку
+                # как «неправдоподобную», то есть удаляло из выборки худшее
+                # наблюдение и смещало результат в пользу тезиса. Проверка
+                # ставилась против ошибок сопоставления бумаги, а не против
+                # неудобных исходов.
+                status = "ok"
             else:
                 status = "implausible_ratio"
             results.append(
@@ -298,6 +312,12 @@ def main() -> int:
                     "procedure_price": str(price),
                     "market_close_before": market if market else "",
                     "price_to_market": round(ratio, 3) if ratio else "",
+                    "ratio_outside_plausible_range": (
+                        "yes"
+                        if ratio is not None
+                        and not (MIN_PLAUSIBLE_RATIO <= ratio <= MAX_PLAUSIBLE_RATIO)
+                        else ""
+                    ),
                     "status": status,
                 }
             )
@@ -314,7 +334,12 @@ def main() -> int:
     print(f"  target resolved to a MOEX security and price plausible: {len(usable)}")
     print(f"  target not listed on MOEX: {sum(1 for r in results if r['status'] == 'target_not_listed_on_moex')}")
     print(
-        f"  implausible price/market ratio: {sum(1 for r in results if r['status'] == 'implausible_ratio')}"
+        "  implausible price/market ratio (name-matched target, rejected): "
+        f"{sum(1 for r in results if r['status'] == 'implausible_ratio')}"
+    )
+    print(
+        "  extreme ratio kept as a real outlier (target matched by INN): "
+        f"{sum(1 for r in results if r['status'] == 'ok' and r['ratio_outside_plausible_range'])}"
     )
     renamed = sum(1 for r in results if r["secid"] and r["secid"] != r["secid_in_reference_book"])
     print(
