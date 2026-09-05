@@ -43,19 +43,37 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-# Ссылка на сообщение — форма менялась между версиями сайта, поэтому
-# принимаются все известные варианты.
-EVENT_LINK_RE = re.compile(
-    r'href="([^"]*(?:event\.aspx\?EventId=|/event/|/message/)(\d+)[^"]*)"[^>]*>(.*?)</a>',
+# Реальная разметка выдачи (проверено на сохранённом веб-архиве 2026-09-05):
+#   <tr><td>23.12.2019 19:19</td>
+#       <td><a href="/portal/company.aspx?id=5306">Эмитент</a><br>
+#           <a href="/portal/event.aspx?EventId=ТОКЕН">Тип сообщения</a>
+#           <span class="graytext">ИНТЕРФАКС</span></td></tr>
+# EventId — непрозрачный буквенный токен, не число: "9pl6UmkErEOBFJ0FYQ-ArfQ-B-B".
+ROW_RE = re.compile(
+    r"<tr[^>]*>\s*<td[^>]*>\s*(?P<date>\d{2}\.\d{2}\.\d{4})\s+(?P<time>\d{2}:\d{2})\s*</td>"
+    r"\s*<td[^>]*>(?P<body>.*?)</td>",
     re.DOTALL | re.IGNORECASE,
 )
-# Строка выдачи в отрисованном виде: дата, время, эмитент, тип, распространитель.
-# Распространитель в конце — надёжный ограничитель: он всегда один из немногих.
+COMPANY_RE = re.compile(
+    r'<a[^>]+href="[^"]*company\.aspx\?id=(?P<company_id>\d+)[^"]*"[^>]*>(?P<issuer>.*?)</a>',
+    re.DOTALL | re.IGNORECASE,
+)
+EVENT_RE = re.compile(
+    # В классе символов нужен именно литерал "&": разделитель в разметке —
+    # "&amp;", и написание [^"&amp;] исключило бы ещё и буквы a, m, p, ";",
+    # обрезая токен на первой из них (так и было — ключи схлопывались).
+    r'<a[^>]+href="[^"]*event\.aspx\?EventId=(?P<event_id>[^"&]+)[^"]*"[^>]*>(?P<title>.*?)</a>',
+    re.DOTALL | re.IGNORECASE,
+)
+DISTRIBUTOR_RE = re.compile(
+    r'<span[^>]*class="graytext"[^>]*>(?P<distributor>.*?)</span>', re.DOTALL | re.IGNORECASE
+)
+# Запасной разбор по тексту, если разметка снова изменится.
 TEXT_ROW_RE = re.compile(
     r"(?P<date>\d{2}\.\d{2}\.\d{4})\s+(?P<time>\d{2}:\d{2})\s+"
     r"(?P<issuer>.{3,150}?)\s+"
     r"(?P<title>Поступление эмитенту .{10,250}?)\s+"
-    r"(?:ИНТЕРФАКС|Прайм|ПРАЙМ|AZIPI|АЗИПИ|СКРИН|СКРИН\b|АК&М|АКМ)",
+    r"(?:ИНТЕРФАКС|Прайм|ПРАЙМ|AZIPI|АЗИПИ|СКРИН|АК&М|АКМ)",
     re.IGNORECASE,
 )
 DATE_RE = re.compile(r"\b(\d{2}\.\d{2}\.\d{4})\b")
@@ -93,21 +111,26 @@ def read_page(path: Path) -> str:
     return "\n".join(parts)
 
 
-def rows_from_links(page: str) -> list[dict[str, str]]:
+def rows_from_table(page: str) -> list[dict[str, str]]:
+    """Строки таблицы выдачи — дата, эмитент, тип сообщения, распространитель."""
     found: list[dict[str, str]] = []
-    for match in EVENT_LINK_RE.finditer(page):
-        title = strip_tags(match.group(3))
-        if not title:
+    for row in ROW_RE.finditer(page):
+        body = row.group("body")
+        event = EVENT_RE.search(body)
+        if event is None:
             continue
-        window = page[max(0, match.start() - 400) : match.start()]
-        dates = DATE_RE.findall(strip_tags(window))
+        company = COMPANY_RE.search(body)
+        distributor = DISTRIBUTOR_RE.search(body)
         found.append(
             {
-                "event_id": match.group(2),
-                "issuer": "",
-                "title": title,
-                "published_at": dates[-1] if dates else "",
-                "extracted_by": "link",
+                "event_id": htmlmod.unescape(event.group("event_id")).strip(),
+                "issuer": strip_tags(company.group("issuer")) if company else "",
+                "company_id": company.group("company_id") if company else "",
+                "title": strip_tags(event.group("title")),
+                "published_at": row.group("date"),
+                "published_time": row.group("time"),
+                "distributor": strip_tags(distributor.group("distributor")) if distributor else "",
+                "extracted_by": "table",
             }
         )
     return found
@@ -182,7 +205,7 @@ def main() -> int:
             page = read_page(path)
             if len(page) > biggest[0]:
                 biggest = (len(page), page, path.name)
-            rows = rows_from_links(page) or rows_from_text(page)
+            rows = rows_from_table(page) or rows_from_text(page)
             for row in rows:
                 if row["event_id"] in seen:
                     continue
