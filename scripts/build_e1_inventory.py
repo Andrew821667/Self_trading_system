@@ -131,6 +131,59 @@ def clause_body(text: str, hint: str) -> str | None:
     return None
 
 
+def has_clause(text: str, *hints: str) -> bool:
+    """Есть ли в документе нумерованный пункт, который такой факт вообще несёт.
+
+    Нужно затем же, зачем `has_clause` в scripts/parse_interfax_events.py:
+    отличить «пункт не прочитан» от «пункт прочитан, факта в нём нет». См.
+    `pending_fields` ниже.
+    """
+    for line in text.splitlines():
+        match = _CLAUSE_RE.match(line)
+        if match and any(h.lower() in match.group(2).lower() for h in hints):
+            return True
+    return False
+
+
+def pending_fields(row: dict, text: str) -> list[str]:
+    """Факты, которые документ несёт, но этот проход их не прочитал.
+
+    Схема `InventoryEvent` требует различать «ещё не прочитано» и
+    «прочитано, факта в документе нет»: правило D чек-листа дисквалифицирует
+    событие за первое, но не за второе. Прежняя реализация помечала pending
+    любое пустое поле и тем самым смешивала эти два состояния. Ярче всего это
+    видно на `price_basis`: он оказывался pending у 265 событий из 270, хотя
+    пункт о цене прочитан целиком и базы в нём просто не названо — она в
+    приложенном отчёте оценщика. При таком счёте к классификации не
+    допускалось ни одно событие инвентаря, то есть предохранитель срабатывал
+    не на неполноте данных, а на самом факте своего существования.
+
+    Ослабления правила D тут нет. Событие, у которого условия процедуры лежат
+    в приложении (короткое уведомление без пунктов о цене и гаранте),
+    по-прежнему получает pending и к классификации не допускается — а это
+    ровно тот случай, ради которого предохранитель и ставился.
+    """
+    pending: list[str] = []
+    price_clause_read = has_clause(text, PRICE_HINT)
+    if not row.get("procedure_price") and not price_clause_read:
+        pending.append("procedure_price")
+    if not row.get("price_basis") and not price_clause_read:
+        pending.append("price_basis")
+    if (
+        not row.get("guarantor_bank")
+        and row["event_type"] == "voluntary_or_mandatory_offer"
+        and not has_clause(text, GUARANTOR_HINT)
+    ):
+        pending.append("guarantor_bank")
+    if not row.get("acquirer") and not has_clause(text, *ACQUIRER_HINTS):
+        pending.append("acquirer")
+    pending.sort()
+    # ISIN — не факт документа в смысле чек-листа, а идентификатор бумаги.
+    # Часть сообщений называет только госномер выпуска; бумага в этом случае
+    # находится по ИНН через справочник MOEX (scripts/check_tradability.py).
+    return pending
+
+
 def clause_body_any(text: str, hints: tuple[str, ...]) -> str | None:
     for hint in hints:
         found = clause_body(text, hint)
@@ -228,9 +281,7 @@ def build_row(index_row: dict, documents_dir: Path) -> dict | None:
             "azipi_index.jsonl — see scripts/validate_azipi_documents.py"
         ),
     }
-    row["pending_fields"] = sorted(
-        field for field in DOCUMENT_DERIVED_FIELDS if row.get(field) in (None, "", [])
-    )
+    row["pending_fields"] = pending_fields(row, text)
     return row
 
 

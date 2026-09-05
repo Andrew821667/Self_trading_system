@@ -29,6 +29,7 @@ JSONL, совместимый с инвентарём Stage E-1.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html as htmlmod
 import json
 import plistlib
@@ -125,6 +126,59 @@ ACQUIRER_HINTS = (
 GUARANTOR_HINT = re.compile(r"гаранта,\s+предоставившего банковскую гарантию", re.IGNORECASE)
 RECEIVED_HINTS = (re.compile(r"дата получения эмитентом", re.IGNORECASE),)
 
+# "код сообщeния: 3045208" — на странице портала буква "e" в слове латинская;
+# шаблон намеренно принимает обе, чтобы опечатка в вёрстке не стоила нам
+# устойчивого идентификатора сообщения.
+MESSAGE_CODE_RE = re.compile(r"код сообщ[еe]ния:\s*(\d+)", re.IGNORECASE)
+# Штамп публикации портала прямо над кодом сообщения: "28.07.2020 08:39".
+PUBLISHED_RE = re.compile(
+    r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}:\d{2})\s+код сообщ[еe]ния", re.IGNORECASE
+)
+SOURCE_TYPE = "disclosure_center_interfax"
+# Заголовок сообщения → семейство события. Соответствие взято один в один из
+# TYPE_CODES в scripts/collect_azipi.py, чтобы событие получало один и тот же
+# event_type независимо от того, из какого портала оно пришло.
+MESSAGE_TYPES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"Поступление эмитенту (?:добровольного|обязательного|конкурирующего) предложения"
+            r"[^.]{0,80}?ценных бумаг",
+            re.IGNORECASE,
+        ),
+        "voluntary_or_mandatory_offer",
+    ),
+    (
+        re.compile(
+            r"Поступление эмитенту (?:требования о выкупе|уведомления о праве требовать)"
+            r"[^.]{0,80}?ценных бумаг",
+            re.IGNORECASE,
+        ),
+        "squeeze_out_request_95",
+    ),
+)
+# Формулировки, которыми эмитент объясняет, откуда взялась цена. Совпадают со
+# scripts/build_e1_inventory.py: price_basis должен значить одно и то же в
+# обеих половинах инвентаря, иначе классификация читает разные шкалы.
+PRICE_BASIS_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("средневзвешенн", "биржевая средневзвешенная цена"),
+    ("оценщик", "рыночная стоимость по отчёту оценщика"),
+    ("организатор", "цена по данным организатора торговли"),
+    ("наибольш", "наибольшая из предусмотренных законом величин"),
+)
+
+
+def published_at(text: str) -> str | None:
+    """ISO-дата публикации сообщения по штампу портала."""
+    m = PUBLISHED_RE.search(text)
+    return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
+
+def price_basis_of(clause_text: str | None) -> str | None:
+    if not clause_text:
+        return None
+    lowered = clause_text.lower()
+    return next((label for needle, label in PRICE_BASIS_PATTERNS if needle in lowered), None)
+
 
 def read_page(path: Path) -> str:
     if path.suffix.lower() != ".webarchive":
@@ -132,6 +186,19 @@ def read_page(path: Path) -> str:
     archive = plistlib.loads(path.read_bytes())
     data = archive.get("WebMainResource", {}).get("WebResourceData")
     return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else ""
+
+
+def page_url(path: Path) -> str:
+    """Адрес, с которого страница сохранена — из самого `.webarchive`.
+
+    Safari кладёт исходный URL внутрь архива, поэтому его не нужно ни
+    угадывать по коду сообщения, ни спрашивать у владельца: сохранённый файл
+    сам знает, откуда он.
+    """
+    if path.suffix.lower() != ".webarchive":
+        return ""
+    archive = plistlib.loads(path.read_bytes())
+    return str(archive.get("WebMainResource", {}).get("WebResourceURL") or "")
 
 
 def to_text(page: str) -> str:
@@ -150,6 +217,20 @@ def clauses(text: str) -> list[tuple[str, str]]:
 
 
 NOT_APPLICABLE = "не применимо"
+
+
+def has_clause(items: list[tuple[str, str]], *hints: re.Pattern[str]) -> bool:
+    """Есть ли в документе пункт, который такой факт вообще несёт.
+
+    Это не то же самое, что «факт прочитан». Пункт про ценовую базу
+    существует почти всегда, но почти никогда её не называет — там просто
+    число. Прочитать пункт и увидеть, что базы в нём нет, — это результат,
+    а не пробел; такое поле остаётся пустым, но НЕ попадает в
+    `pending_fields`. Пустое поле при отсутствующем пункте — другое дело:
+    факт может лежать в приложении, которого мы не открывали, и вот он
+    действительно pending.
+    """
+    return any(h.search(body) for _num, body in items for h in hints)
 
 
 def clause_with(items: list[tuple[str, str]], *hints: re.Pattern[str]) -> str | None:
@@ -245,7 +326,65 @@ def parse_price(text: str) -> str | None:
         return None
 
 
-def build(path: Path) -> dict | None:
+def pending_fields(row: dict, items: list[tuple[str, str]], event_type: str) -> list[str]:
+    """Факты, которые документ несёт, но этот проход их не прочитал.
+
+    Схема `InventoryEvent` требует различать «ещё не прочитано» и «прочитано,
+    факта в документе нет» — правило D чек-листа дисквалифицирует событие за
+    первое, но не за второе. Прежняя реализация помечала pending любое пустое
+    поле и тем самым смешивала эти два состояния: `price_basis` оказывался
+    pending у 265 событий из 270, хотя пункт о цене прочитан целиком и базы в
+    нём просто не названо — она в приложенном отчёте оценщика. При таком
+    счёте к классификации не допускался вообще никто.
+
+    Правило здесь буквальное: pending — там, где не прочитан сам носитель
+    факта.
+
+    * цена и ценовая база — pending, если пункта о цене в документе не нашлось
+      (короткое уведомление со ссылкой на приложение). Если пункт найден и
+      прочитан, базы в нём нет — это ответ, а не пробел;
+    * гарант — pending только у предложений (ст. 84.1/84.2), где гарантия
+      обязательна. У вытеснения по ст. 84.8 она не требуется, и её отсутствие
+      не пробел;
+    * ISIN — не факт документа в смысле чек-листа, а идентификатор бумаги;
+      если сообщение называет только госномер выпуска, бумага находится по
+      ИНН через справочник MOEX (scripts/check_tradability.py), поэтому
+      pending здесь не ставится.
+    """
+    pending: list[str] = []
+    price_clause_read = has_clause(items, *PRICE_HINTS)
+    if not row.get("procedure_price") and not price_clause_read:
+        pending.append("procedure_price")
+    if not row.get("price_basis") and not price_clause_read:
+        pending.append("price_basis")
+    if (
+        not row.get("guarantor_bank")
+        and event_type == "voluntary_or_mandatory_offer"
+        and not has_clause(items, GUARANTOR_HINT)
+    ):
+        pending.append("guarantor_bank")
+    if not row.get("acquirer") and not has_clause(items, *ACQUIRER_HINTS):
+        pending.append("acquirer")
+    return sorted(pending)
+
+
+def event_type_of(text: str) -> tuple[str, str] | None:
+    """(event_type, заголовок сообщения) по типу сообщения на странице.
+
+    Соответствие ровно то же, что TYPE_CODES в scripts/collect_azipi.py: у
+    АЗИПИ разные коды на добровольное и обязательное предложение сведены в
+    одно семейство, и здесь так же — иначе одно и то же событие получило бы
+    разный event_type в зависимости от того, через какой портал оно пришло.
+    """
+    for pattern, event_type in MESSAGE_TYPES:
+        m = pattern.search(text)
+        if m:
+            return event_type, m.group(0)
+    return None
+
+
+def build(path: Path) -> tuple[dict, str, dict] | None:
+    """(строка инвентаря, текст документа, метаданные) или None, если не читается."""
     text = to_text(read_page(path))
     items = clauses(text)
     if not items:
@@ -256,8 +395,10 @@ def build(path: Path) -> dict | None:
     # вовсе, а десяти- или двенадцатизначное число в этом пункте одно.
     inn_clause = next((b for _n, b in items if INN_HINT.search(b)), None)
     inn = INN_RE.search(inn_clause) if inn_clause else None
-    if not (issuer and inn):
+    kind = event_type_of(text)
+    if not (issuer and inn and kind):
         return None
+    event_type, title = kind
 
     price_body = clause_with(items, *PRICE_HINTS)
     guarantor = clause_with(items, GUARANTOR_HINT)
@@ -265,49 +406,119 @@ def build(path: Path) -> dict | None:
     date_body = clause_with(items, *EVENT_DATE_HINTS) or clause_with(items, *RECEIVED_HINTS)
     isin_m = ISIN_RE.search(text)
 
+    # `announcement_date` — дата **раскрытия**, а не дата наступления события.
+    # Так её определяет stage-E-1/README.md ("дата первого раскрытия"), и это
+    # не формальность: у 10 из 33 сообщений событие датировано одним днём, а
+    # опубликовано следующим. Если взять дату события, окно входа откроется
+    # на день раньше, чем новость стала публичной, — то есть в основании
+    # исследования появится заглядывание вперёд, ровно то, что этап E-1
+    # обязан исключить.
+    published = published_at(text)
+    submission = parse_date(date_body) if date_body else None
+    announcement = published or submission
+
+    # Идентификатор — код сообщения самого портала, а не имя файла: имена
+    # владелец давал вручную (event_01…event_33) и они ничего не значат за
+    # пределами одной папки, а код 3045208 однозначно указывает на сообщение
+    # и переживает любое переименование.
+    code_m = MESSAGE_CODE_RE.search(text)
+    ident = code_m.group(1) if code_m else path.stem
+    event_id = f"e1-ix-{ident}"
+    doc_id = f"ix-{ident}"
+
     row = {
-        "event_id": f"e1-ix-{path.stem}",
+        "event_id": event_id,
+        "event_type": event_type,
         "issuer": re.sub(r"\s+", " ", issuer).strip(),
-        "inn": inn.group(1),
-        "announcement_date": parse_date(date_body) if date_body else None,
+        "announcement_date": announcement,
+        # Дата, которой датировано само событие: получение эмитентом
+        # предложения или требования. Отличается от даты раскрытия на 0-1
+        # день и хранится отдельно, чтобы разницу можно было проверить, а не
+        # выбирать между двумя датами вслепую.
+        "submission_date": submission,
         "isin": isin_m.group(1).replace(" ", "") if isin_m else None,
         "procedure_price": parse_price(price_body) if price_body else None,
+        "price_basis": price_basis_of(price_body),
         "guarantor_bank": guarantor,
         "acquirer": acquirer,
-        "source_document_refs": [path.name],
-        "provenance": "e-disclosure.ru message page saved by the owner; issuer/INN/date read from the document itself",
-        "retrieved_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "source_document_refs": [doc_id],
+        "provenance": (
+            f"e-disclosure.ru message {ident} ({title}); saved as {path.name} by the owner; "
+            "issuer/INN/date read from the document itself, not from the search listing"
+        ),
     }
-    row["pending_fields"] = sorted(
-        f
-        for f in ("isin", "procedure_price", "guarantor_bank", "acquirer", "announcement_date")
-        if not row.get(f)
-    )
-    return row
+    row["pending_fields"] = pending_fields(row, items, event_type)
+
+    # Первая строка — ровно в том формате, который читают
+    # scripts/check_tradability.py и scripts/resolve_target_security.py у
+    # документов АЗИПИ. Так объединённый инвентарь идёт дальше по конвейеру
+    # без развилок «а откуда эта строка пришла».
+    ru_date = f"{announcement[8:]}.{announcement[5:7]}.{announcement[:4]}" if announcement else "??"
+    document = f"{row['issuer']} (ИНН: {inn.group(1)}) / {title} - {ru_date}\n{text}\n"
+
+    meta = {
+        "doc_id": doc_id,
+        "event_id": event_id,
+        "url": page_url(path),
+        "source_type": SOURCE_TYPE,
+        # Штамп публикации портала. Именно его читает проверка утечки в
+        # scripts/validate_e1_inventory.py: классификация вправе ссылаться
+        # только на документы, опубликованные не позже даты события.
+        "published_at": announcement,
+        "retrieved_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "sha256": hashlib.sha256(document.encode("utf-8")).hexdigest(),
+        "legal_use_status": "attribution_required",
+        "local_filename": f"{doc_id}.txt",
+    }
+    return row, document, meta
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--events", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument(
+        "--documents",
+        type=Path,
+        required=True,
+        help="куда положить текст документа: <documents>/<event_id>/<doc_id>.txt",
+    )
     args = ap.parse_args()
 
     files = sorted(
         p for p in args.events.rglob("*") if p.suffix.lower() in {".webarchive", ".html"}
     )
-    rows = [r for r in (build(p) for p in files) if r]
+    built = [(p, build(p)) for p in files]
+    unread = [p.name for p, r in built if r is None]
+    rows = []
+    for _p, result in built:
+        if result is None:
+            continue
+        row, document, meta = result
+        rows.append(row)
+        folder = args.documents / row["event_id"]
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / meta["local_filename"]).write_text(document, encoding="utf-8")
+        (folder / f"{meta['doc_id']}.meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
-        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + ("\n" if rows else ""),
+        "\n".join(
+            json.dumps(r, ensure_ascii=False)
+            for r in sorted(rows, key=lambda r: (r["event_type"], r["announcement_date"] or ""))
+        )
+        + ("\n" if rows else ""),
         encoding="utf-8",
     )
     filled = {
         f: sum(1 for r in rows if r.get(f))
         for f in (
-            "inn",
             "announcement_date",
             "isin",
             "procedure_price",
+            "price_basis",
             "guarantor_bank",
             "acquirer",
         )
@@ -316,7 +527,9 @@ def main() -> int:
     print(f"разобрано: {len(rows)}")
     for f, c in filled.items():
         print(f"  {f:18} {c}/{len(rows)}")
-    print(f"записано -> {args.out}")
+    if unread:
+        print(f"не прочитано ({len(unread)}): {', '.join(unread)}")
+    print(f"записано -> {args.out}, документы -> {args.documents}")
     return 0 if rows else 1
 
 
