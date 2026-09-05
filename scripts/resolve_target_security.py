@@ -51,7 +51,18 @@ MAX_ATTEMPTS = 3
 MIN_PLAUSIBLE_RATIO = 0.2
 MAX_PLAUSIBLE_RATIO = 5.0
 
-PRICE_HINT = "цена приобрет"
+# Формулировок пункта о цене несколько, и по одной подстроке "цена приобрет"
+# выпадали ВСЕ требования о выкупе: у них написано "цена выкупаемых ценных
+# бумаг". Шестнадцать торгуемых событий не попадали в этот файл вовсе —
+# молча, потому что событие без пункта о цене просто пропускалось. Набор
+# подсказок теперь тот же, что у разборов инвентаря.
+PRICE_HINTS = (
+    "цена выкупаемых",
+    "цена приобретаемых",
+    "цена приобретения",
+    "цена приобрет",
+    "предлагаемая цена",
+)
 # "0,00289 рублей" — kopeck-fraction prices are real in this family, so the
 # decimal tail must not be capped at two digits.
 # The target is named right after the price: "за одну обыкновенную акцию X".
@@ -63,6 +74,7 @@ _TARGET_RE = re.compile(
     re.IGNORECASE,
 )
 _QUOTED_RE = re.compile(r"[\"«]([^\"»]{2,60})[\"»]")
+_TITLE_INN_RE = re.compile(r"^.+?\(ИНН:\s*(\d+)\)\s*/")
 
 
 def normalise(name: str) -> str:
@@ -146,9 +158,17 @@ def close_before(secid: str, day: date) -> tuple[float | None, str]:
 
 def price_clause(text: str) -> str | None:
     for line in text.splitlines():
-        if PRICE_HINT in line.lower() and re.search(r"\d", line):
+        lowered = line.lower()
+        if any(hint in lowered for hint in PRICE_HINTS) and re.search(r"\d", line):
             return re.sub(r"\s+", " ", line).strip()
     return None
+
+
+def document_inn(text: str) -> str | None:
+    """ИНН эмитента из первой строки документа — как в check_tradability.py."""
+    first_line = text.splitlines()[0].strip() if text.strip() else ""
+    match = _TITLE_INN_RE.match(first_line)
+    return match.group(1) if match else None
 
 
 def main() -> int:
@@ -161,11 +181,15 @@ def main() -> int:
 
     securities = json.loads(args.moex.read_text(encoding="utf-8"))
     by_name: dict[str, list[dict]] = {}
+    by_inn: dict[str, list[dict]] = {}
     for security in securities:
         for field in ("emitent_title", "name", "shortname"):
             key = normalise(str(security.get(field) or ""))
             if key:
                 by_name.setdefault(key, []).append(security)
+        inn = str(security.get("emitent_inn") or "").strip()
+        if inn:
+            by_inn.setdefault(inn, []).append(security)
 
     events = [
         json.loads(line)
@@ -179,9 +203,8 @@ def main() -> int:
         text_path = args.documents / event["event_id"] / f"{doc_id}.txt"
         if not text_path.is_file():
             continue
-        clause = price_clause(text_path.read_text(encoding="utf-8"))
-        if not clause:
-            continue
+        text = text_path.read_text(encoding="utf-8")
+        clause = price_clause(text)
 
         # Цена берётся из инвентаря, а не разбирается здесь заново. Раньше
         # этот скрипт читал её своими шаблонами — то есть в проекте жили две
@@ -196,19 +219,27 @@ def main() -> int:
             continue
         price = Decimal(event["procedure_price"])
 
-        # When the clause names a company after the price, the offer concerns
-        # *that* company's shares — a holding disclosing about a subsidiary.
-        # When it names none, the target is the filer's own shares, which is
-        # the ordinary case. Defaulting to the filer instead of skipping is
-        # what makes most of the collected offers usable at all.
-        target_match = _TARGET_RE.search(clause)
-        target_name = (
-            re.sub(r"\s+", " ", target_match.group(1)).strip()
-            if target_match
-            else event["issuer"]
-        )
+        # Обычный случай: предложение адресовано акционерам самого подателя,
+        # и тогда бумага находится по его ИНН — точное соединение, без
+        # подбора по названию. Именно этим занимается check_tradability.py,
+        # и расходиться с ним здесь не за чем.
+        #
+        # Исключение: холдинг раскрывает о дочерней компании, и тогда
+        # название цели стоит прямо в пункте о цене («за одну обыкновенную
+        # акцию ПАО „Икс“»). Только в этом случае в ход идёт подбор по
+        # названию — с оговоркой, что он ненадёжен: «Красный Октябрь» — это
+        # и деревообрабатывающий комбинат (ИНН 7204660270), и московская
+        # кондитерская фабрика (7706043263), а «Кристалл» — и владикавказский
+        # завод (1500000120), и биржевая «Алкогольная группа» (9731121416).
+        # Отношение цены к рынку ниже такие подмены и ловит.
+        target_match = _TARGET_RE.search(clause) if clause else None
         target_from_document = target_match is not None
-        candidates = by_name.get(normalise(target_name), [])
+        if target_match:
+            target_name = re.sub(r"\s+", " ", target_match.group(1)).strip()
+            candidates = by_name.get(normalise(target_name), [])
+        else:
+            target_name = event["issuer"]
+            candidates = by_inn.get(document_inn(text) or "", [])
         if not candidates:
             results.append(
                 {
@@ -216,7 +247,7 @@ def main() -> int:
                     "announcement_date": event["announcement_date"],
                     "filer": event["issuer"],
                     "target_named_in_document": target_name,
-                    "target_source": "document" if target_from_document else "filer",
+                    "target_source": "document" if target_from_document else "filer_inn",
                     "secid": "",
                     "secid_in_reference_book": "",
                     "procedure_price": str(price),
@@ -261,7 +292,7 @@ def main() -> int:
                     "announcement_date": event["announcement_date"],
                     "filer": event["issuer"],
                     "target_named_in_document": target_name,
-                    "target_source": "document" if target_from_document else "filer",
+                    "target_source": "document" if target_from_document else "filer_inn",
                     "secid": used_secid,
                     "secid_in_reference_book": security["secid"],
                     "procedure_price": str(price),
