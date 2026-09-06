@@ -347,7 +347,13 @@ def build(path: Path) -> tuple[dict, str, dict] | None:
         # scripts/validate_e1_inventory.py: классификация вправе ссылаться
         # только на документы, опубликованные не позже даты события.
         "published_at": announcement,
-        "retrieved_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        # Заполняется ниже: если .meta.json уже лежит рядом, берётся его
+        # прежнее значение. Этот разбор ничего не скачивает — страницу
+        # сохранил владелец, и момент получения у документа один на всю
+        # жизнь. Ставить сюда «сейчас» значило бы переписывать дату
+        # получения при каждом прогоне: 42 файла меняются на пустом месте, а
+        # замороженный артефакт перестаёт быть замороженным.
+        "retrieved_at": None,
         "sha256": hashlib.sha256(document.encode("utf-8")).hexdigest(),
         "legal_use_status": "attribution_required",
         "local_filename": f"{doc_id}.txt",
@@ -367,6 +373,7 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     files = sorted(
         p for p in args.events.rglob("*") if p.suffix.lower() in {".webarchive", ".html"}
     )
@@ -394,7 +401,13 @@ def main() -> int:
         folder = args.documents / row["event_id"]
         folder.mkdir(parents=True, exist_ok=True)
         (folder / meta["local_filename"]).write_text(document, encoding="utf-8")
-        (folder / f"{meta['doc_id']}.meta.json").write_text(
+        meta_path = folder / f"{meta['doc_id']}.meta.json"
+        if meta_path.is_file():
+            previous = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta["retrieved_at"] = previous.get("retrieved_at") or now
+        else:
+            meta["retrieved_at"] = now
+        meta_path.write_text(
             json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
 
