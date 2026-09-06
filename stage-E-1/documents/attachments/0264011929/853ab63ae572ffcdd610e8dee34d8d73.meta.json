@@ -1,0 +1,21 @@
+{
+  "md5_from_index": "853ab63ae572ffcdd610e8dee34d8d73",
+  "sha256": "09056d9b0f2708260737a762fd2e0789e973d254214ad78a8f80408f9b69875c",
+  "bytes": 12391355,
+  "url": "https://www.disclosure.ru/issuer/GetFileMD5?md5=853ab63ae572ffcdd610e8dee34d8d73",
+  "source_type": "disclosure_agency_akm",
+  "inn": "0264011929",
+  "issuer": "Aкционерное общество \"Нефтекамская кожгалантерейная фабрика\"",
+  "title": "Требование о выкупе акций АО НКГФ 23.10.2024",
+  "published_at": "23.10.2024",
+  "retrieved_at": "2026-08-25T10:29:50+00:00",
+  "legal_use_status": "public_disclosure",
+  "renditions": [
+    {
+      "member": "853ab63ae572ffcdd610e8dee34d8d73.pdf",
+      "method": "ocr",
+      "chars": 32292,
+      "rendition": "853ab63ae572ffcdd610e8dee34d8d73--853ab63ae572ffcdd610e8dee34d8d73.txt"
+    }
+  ]
+}

@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""Build stage-E-1/inventory/events.jsonl from the AZIPI index + fetched documents.
+
+Fills what the message text states plainly and marks everything else
+`pending_fields` rather than guessing. The checklist is explicit that
+"недостроение фактов предположением запрещено", so a field this script cannot
+read with a deterministic pattern is left unset and named as pending — an
+event carrying pending fields is not eligible for classification
+(`InventoryEvent.is_ready_for_classification`).
+
+Extraction is anchored on the regulator's own numbered clause template
+(1.1 acquirer, 1.7 price, 1.9 guarantor bank, ...), which issuers follow
+closely. That is far less error-prone than hunting for keywords loose in the
+prose, where "цена" also shows up in boilerplate about how a price was
+determined and inside issuer names.
+
+Deliberately rule-based, not LLM-based: Phase A only needs to identify and
+index events. The real structured extraction (schema validation, model and
+prompt version pinning, golden regression set) is Stage E1 work under
+TZ 6.3-6.5 and must not be quietly pre-empted by ad-hoc parsing here.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+
+from document_facts import parse_price, price_basis_of
+
+# Fields that can only come from the document body; anything not extracted
+# below is reported as pending under one of these names.
+DOCUMENT_DERIVED_FIELDS = ("isin", "procedure_price", "price_basis", "guarantor_bank", "acquirer")
+
+# AZIPI type codes that genuinely belong to family E-1. The own-share-buyback
+# codes (1080045, 4005185) were collected as art. 75-76 candidates and then
+# rejected against their own texts — see OUT_OF_FAMILY_CODES in
+# collect_azipi.py. Their rows are written to a separate file rather than
+# dropped, so the collection record stays complete and auditable.
+IN_FAMILY_TYPE_CODES = frozenset({"1079963", "1079964", "1079967", "1079969"})
+
+_ISIN_RE = re.compile(r"\b(RU[A-Z0-9]{10})\b")
+# First line of every AZIPI document: "Эмитент (ИНН: X) / Тип сообщения - дата".
+# Found 2026-08-27 (scripts/validate_azipi_documents.py): AZIPI's own
+# search-results page mispairs the ИНН/issuer caption with the wrong link for
+# roughly 70% of rows — a template bug on their side, reproducible and stable,
+# confirmed by refetching the same message URL twice. The document a link
+# points to is authoritative about itself; the search-listing caption next to
+# that link is not. issuer/announcement_date are therefore read from the
+# document's own declared identity below, never from azipi_index.jsonl.
+_TITLE_RE = re.compile(
+    r"^(?P<issuer>.+?)\s*\(ИНН:\s*(?P<inn>\d+)\)\s*/\s*.+?\s*-\s*(?P<date>\d{2}\.\d{2}\.\d{4})\s*$"
+)
+STUB_MARKER = "Список сообщений"
+_CLAUSE_RE = re.compile(r"^\s*(\d+\.\d+)\.?\s*(.+)$")
+
+# Two wordings occur: the offer template ("лицо, направившее добровольное ...
+# предложение") and the buyout template ("лицо, направившее уведомление о
+# праве требовать выкуп ... или требование о выкупе").
+ACQUIRER_HINTS = ("направившего добровольное", "направившего уведомление о праве требовать")
+PRICE_HINT = "цена приобретаемых ценных бумаг"
+GUARANTOR_HINT = "гаранта, предоставившего банковскую гарантию"
+
+_ORG_RE = re.compile(
+    r"((?:Публичное акционерное общество|Акционерное общество|"
+    r"Общество с ограниченной ответственностью|ПАО|АО|ООО)"
+    r"\s*[\"«][^\"»]{2,80}[\"»])"
+)
+# The person on the other side of an offer is often an individual, not a
+# company — "Кустов Илья Михайлович". Treated as an equally valid acquirer
+# rather than dropped as an extraction miss.
+_PERSON_RE = re.compile(r"^([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2})\s*[.,]?\s*$")
+EMPTY_ANSWERS = ("отсутствует", "-", "—", "нет", "не применимо")
+
+
+def clause_body(text: str, hint: str) -> str | None:
+    """Answer part of the first numbered clause whose text contains `hint`.
+
+    Some issuers put the answer on the lines *after* the clause label instead
+    of behind its colon, so a clause that looks empty is followed up rather
+    than treated as absent.
+    """
+    lines = text.splitlines()
+    for position, line in enumerate(lines):
+        match = _CLAUSE_RE.match(line)
+        if not match or hint.lower() not in match.group(2).lower():
+            continue
+        _label, _sep, answer = match.group(2).partition(":")
+        answer = re.sub(r"\s+", " ", answer).strip()
+        if not answer:
+            answer = " ".join(
+                candidate.strip()
+                for candidate in lines[position + 1 : position + 4]
+                if candidate.strip() and not _CLAUSE_RE.match(candidate)
+            )
+            answer = re.sub(r"\s+", " ", answer).strip()
+        if answer and answer.rstrip(".").lower() not in EMPTY_ANSWERS:
+            return answer
+    return None
+
+
+def has_clause(text: str, *hints: str) -> bool:
+    """Есть ли в документе нумерованный пункт, который такой факт вообще несёт.
+
+    Нужно затем же, зачем `has_clause` в scripts/parse_interfax_events.py:
+    отличить «пункт не прочитан» от «пункт прочитан, факта в нём нет». См.
+    `pending_fields` ниже.
+    """
+    for line in text.splitlines():
+        match = _CLAUSE_RE.match(line)
+        if match and any(h.lower() in match.group(2).lower() for h in hints):
+            return True
+    return False
+
+
+def pending_fields(row: dict, text: str) -> list[str]:
+    """Факты, которые документ несёт, но этот проход их не прочитал.
+
+    Схема `InventoryEvent` требует различать «ещё не прочитано» и
+    «прочитано, факта в документе нет»: правило D чек-листа дисквалифицирует
+    событие за первое, но не за второе. Прежняя реализация помечала pending
+    любое пустое поле и тем самым смешивала эти два состояния. Ярче всего это
+    видно на `price_basis`: он оказывался pending у 265 событий из 270, хотя
+    пункт о цене прочитан целиком и базы в нём просто не названо — она в
+    приложенном отчёте оценщика. При таком счёте к классификации не
+    допускалось ни одно событие инвентаря, то есть предохранитель срабатывал
+    не на неполноте данных, а на самом факте своего существования.
+
+    Ослабления правила D тут нет. Событие, у которого условия процедуры лежат
+    в приложении (короткое уведомление без пунктов о цене и гаранте),
+    по-прежнему получает pending и к классификации не допускается — а это
+    ровно тот случай, ради которого предохранитель и ставился.
+    """
+    pending: list[str] = []
+    price_clause_read = has_clause(text, PRICE_HINT)
+    if not row.get("procedure_price") and not price_clause_read:
+        pending.append("procedure_price")
+    if not row.get("price_basis") and not price_clause_read:
+        pending.append("price_basis")
+    if (
+        not row.get("guarantor_bank")
+        and row["event_type"] == "voluntary_or_mandatory_offer"
+        and not has_clause(text, GUARANTOR_HINT)
+    ):
+        pending.append("guarantor_bank")
+    if not row.get("acquirer") and not has_clause(text, *ACQUIRER_HINTS):
+        pending.append("acquirer")
+    pending.sort()
+    # ISIN — не факт документа в смысле чек-листа, а идентификатор бумаги.
+    # Часть сообщений называет только госномер выпуска; бумага в этом случае
+    # находится по ИНН через справочник MOEX (scripts/check_tradability.py).
+    return pending
+
+
+def clause_body_any(text: str, hints: tuple[str, ...]) -> str | None:
+    for hint in hints:
+        found = clause_body(text, hint)
+        if found:
+            return found
+    return None
+
+
+def first_org(value: str | None) -> str | None:
+    """Organisation name, or an individual's name when the party is a person."""
+    if not value:
+        return None
+    match = _ORG_RE.search(value)
+    if match:
+        return match.group(1).strip()
+    person = _PERSON_RE.match(value.strip())
+    return person.group(1).strip() if person else None
+
+
+def to_iso(russian_date: str) -> str | None:
+    match = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", russian_date or "")
+    if not match:
+        return None
+    day, month, year = match.groups()
+    return f"{year}-{month}-{day}"
+
+
+def document_identity(text: str) -> tuple[str, str, str] | None:
+    """(issuer, inn, iso_date) from the document's own title line, or None
+    for a stub page / unparseable title. See _TITLE_RE above for why this,
+    and not the index row, is what issuer/announcement_date come from."""
+    first_line = text.splitlines()[0].strip() if text.strip() else ""
+    if not first_line or STUB_MARKER in first_line:
+        return None
+    match = _TITLE_RE.match(first_line)
+    if not match:
+        return None
+    iso_date = to_iso(match.group("date"))
+    if iso_date is None:
+        return None
+    return match.group("issuer").strip(), match.group("inn"), iso_date
+
+
+def build_row(index_row: dict, documents_dir: Path) -> dict | None:
+    event_id = f"e1-azipi-{index_row['azipi_message_id']}"
+    doc_id = f"azipi-{index_row['azipi_message_id']}"
+    text_path = documents_dir / event_id / f"{doc_id}.txt"
+    text = text_path.read_text(encoding="utf-8") if text_path.is_file() else ""
+
+    identity = document_identity(text)
+    if identity is None:
+        # A stub page (AZIPI served its generic listing instead of the real
+        # message) or a title line this pattern cannot read. Either way there
+        # is no self-declared identity to trust, so the event is not built —
+        # see unusable_documents.jsonl in main() for where these go instead.
+        return None
+    issuer, _inn, announcement = identity
+
+    price_clause = clause_body(text, PRICE_HINT)
+
+    # Разбор цены — общий с разбором «Интерфакса» (scripts/document_facts.py).
+    # Своя реализация здесь читала «0,592 (ноль целых пятьсот девяносто две
+    # тысячных) рубля» как 592: дробная часть была ограничена двумя знаками,
+    # «0,59» под «рубля» не подходило, зато подходило «592» из середины
+    # числа. Ошибка в тысячу раз, и ни одна проверка её не ловила.
+    procedure_price = parse_price(price_clause) if price_clause else None
+
+    isin_match = _ISIN_RE.search(text)
+    row: dict = {
+        "event_id": event_id,
+        "event_type": index_row["event_type"],
+        "issuer": issuer,
+        "announcement_date": announcement,
+        "isin": isin_match.group(1) if isin_match else None,
+        "procedure_price": procedure_price,
+        "price_basis": price_basis_of(price_clause),
+        "guarantor_bank": first_org(clause_body(text, GUARANTOR_HINT)),
+        "acquirer": first_org(clause_body_any(text, ACQUIRER_HINTS)),
+        "source_document_refs": [doc_id],
+        "provenance": (
+            f"AZIPI message {index_row['azipi_message_id']} "
+            f"(type {index_row['azipi_type_code']}: {index_row['message_title']}); "
+            "issuer/date read from the document's own title line, not from "
+            "azipi_index.jsonl — see scripts/validate_azipi_documents.py"
+        ),
+    }
+    row["pending_fields"] = pending_fields(row, text)
+    return row
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--index", type=Path, required=True)
+    parser.add_argument("--documents", type=Path, required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args()
+
+    index_rows = [
+        json.loads(line)
+        for line in args.index.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    in_family = [r for r in index_rows if r["azipi_type_code"] in IN_FAMILY_TYPE_CODES]
+    out_of_family = [r for r in index_rows if r["azipi_type_code"] not in IN_FAMILY_TYPE_CODES]
+    built = [(r, build_row(r, args.documents)) for r in in_family]
+    rows = [row for _r, row in built if row is not None]
+    unusable = [r for r, row in built if row is None]
+
+    if unusable:
+        unusable_path = args.out.with_name("unusable_documents.jsonl")
+        with unusable_path.open("w", encoding="utf-8") as handle:
+            for r in unusable:
+                handle.write(json.dumps(r, ensure_ascii=False) + "\n")
+        print(
+            f"excluded {len(unusable)} rows with no trustworthy document identity "
+            f"(stub page or unparseable title) -> {unusable_path}"
+        )
+
+    if out_of_family:
+        excluded_path = args.out.with_name("out_of_family.jsonl")
+        with excluded_path.open("w", encoding="utf-8") as handle:
+            for r in out_of_family:
+                handle.write(json.dumps(r, ensure_ascii=False) + "\n")
+        print(f"excluded {len(out_of_family)} out-of-family rows -> {excluded_path}")
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    with args.out.open("w", encoding="utf-8") as handle:
+        for row in sorted(
+            rows, key=lambda r: (r["event_type"], r["announcement_date"], r["issuer"])
+        ):
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    ready = sum(1 for row in rows if not row["pending_fields"])
+    filled = {field: sum(1 for r in rows if r.get(field)) for field in DOCUMENT_DERIVED_FIELDS}
+    print(f"wrote {len(rows)} inventory rows to {args.out}")
+    print(f"  fully extracted (no pending fields): {ready}")
+    print(f"  still awaiting document facts:       {len(rows) - ready}")
+    print("  per-field extraction:")
+    for field, count in filled.items():
+        print(f"    {field:16} {count:4}/{len(rows)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

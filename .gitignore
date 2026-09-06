@@ -10,3 +10,21 @@ build/
 .env
 .env.*
 !.env.example
+
+# Stage E-1 raw HTML captures: large, and the .txt + .meta.json (with sha256)
+# next to them are what the pipeline reads. Re-fetchable via
+# scripts/fetch_azipi_documents.py from the committed index.
+stage-E-1/documents/**/*.html
+# ...except diagnostics the owner sends back: without the page HTML a failure
+# report is a screenshot and a guess.
+!stage-E-1/documents/interfax/debug_*.html
+
+# Stage E-1 offer attachments: RAR/PDF scans, tens of MB each. The committed
+# .txt renditions and .meta.json (with sha256 + URL) are what the pipeline
+# reads and what makes them re-fetchable and verifiable.
+stage-E-1/documents/attachments/*/*.bin
+stage-E-1/documents/attachments/*/*/
+
+# Профиль браузера владельца для сбора с e-disclosure.ru: содержит cookie
+# пройденной проверки, это его личные данные сессии, а не результат работы.
+.interfax-profile/

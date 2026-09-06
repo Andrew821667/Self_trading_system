@@ -1,0 +1,21 @@
+{
+  "md5_from_index": "96a8aaead55e6233d6cbfbf13249e4e3",
+  "sha256": "db01b42f43401bcc4d8ab8b8d0f4a557e01cb34045d7869012b86f65c9e66a68",
+  "bytes": 261033,
+  "url": "https://www.disclosure.ru/issuer/GetFileMD5?md5=96a8aaead55e6233d6cbfbf13249e4e3",
+  "source_type": "disclosure_agency_akm",
+  "inn": "5034050231",
+  "issuer": "Акционерное общество \"Научно-производственное предприятие \"Респиратор\"",
+  "title": "Приложение №2 к Добровольному предложению о раскрытии акций 11.07.2016 11.07.2016",
+  "published_at": "11.07.2016",
+  "retrieved_at": "2026-08-25T10:42:45+00:00",
+  "legal_use_status": "public_disclosure",
+  "renditions": [
+    {
+      "member": "96a8aaead55e6233d6cbfbf13249e4e3.pdf",
+      "method": "text_layer",
+      "chars": 21333,
+      "rendition": "96a8aaead55e6233d6cbfbf13249e4e3--96a8aaead55e6233d6cbfbf13249e4e3.txt"
+    }
+  ]
+}
