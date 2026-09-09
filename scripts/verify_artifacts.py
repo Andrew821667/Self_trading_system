@@ -25,6 +25,7 @@ FROZEN_ARTIFACTS: dict[str, str] = {
     "docs/tz/TZ_v2.0_FINAL.md": "468b75e451e853499a041e4671b9200553c9fb4926a9c4a0d6523f99ad88addb",
     "docs/artifacts/edge_thesis_R0_v1.md": "824f35a033c94d1becfbbc8fb444881d140ce96945f5a7d1ea1e561f0090cdcc",
     "docs/artifacts/event_checklist_E1_v1.md": "ed7d8e50f4cbf301ac57e3460109baf8877f7b7e09a4239216350b0c6452580d",
+    "docs/artifacts/event_checklist_E1_v1_1.md": "16c1bec1c0901fde953e398658e3068be60a648e2004f11a659fcfb71735f096",
 }
 
 

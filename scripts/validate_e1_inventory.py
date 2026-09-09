@@ -50,9 +50,20 @@ INVENTORY_FILE = STAGE_DIR / "inventory" / "events.jsonl"
 DOCUMENTS_DIR = STAGE_DIR / "documents"
 CLASSIFICATION_DIR = STAGE_DIR / "classification"
 
-# event_checklist_E1_v1.md sections B and C.
-CHECKLIST_CRITERIA = tuple(f"П-{i}" for i in range(1, 10))
+# Sections B and C of the frozen checklists. Both versions stay live: a record
+# is judged by the checklist it names, never by the newest one. v1.1 declares
+# П-7 inapplicable to the two families actually collected (it addresses art.
+# 75-76 buybacks, of which the inventory holds none) and counts 7 of the 8
+# applicable criteria — a stricter share than 7 of 9, deliberately, because
+# the amendment was written after it became clear nothing passes under v1.0.
 CHECKLIST_DISQUALIFIERS = tuple(f"Д-{i}" for i in range(1, 11))
+_ALL_CRITERIA = tuple(f"П-{i}" for i in range(1, 10))
+CHECKLIST_VERSIONS: dict[str, tuple[tuple[str, ...], int]] = {
+    "event_checklist_E1_v1": (_ALL_CRITERIA, 7),
+    "event_checklist_E1_v1_1": (tuple(c for c in _ALL_CRITERIA if c != "П-7"), 7),
+}
+# Kept for callers that predate the version split; equals v1.0.
+CHECKLIST_CRITERIA = _ALL_CRITERIA
 MIN_CRITERIA_FOR_ELIGIBLE = 7
 
 
@@ -177,29 +188,39 @@ class ClassificationRecord(BaseModel):
     verdict_grounds: str
     classified_at: datetime
 
+    @property
+    def _checklist(self) -> tuple[tuple[str, ...], int]:
+        try:
+            return CHECKLIST_VERSIONS[self.checklist_version]
+        except KeyError:
+            raise ValueError(
+                f"unknown checklist_version {self.checklist_version!r}; "
+                f"known: {sorted(CHECKLIST_VERSIONS)}"
+            ) from None
+
     @model_validator(mode="after")
     def _covers_full_checklist(self) -> ClassificationRecord:
-        if set(self.criteria) != set(CHECKLIST_CRITERIA):
-            raise ValueError(f"criteria must cover exactly {CHECKLIST_CRITERIA}")
+        criteria, _threshold = self._checklist
+        if set(self.criteria) != set(criteria):
+            raise ValueError(f"criteria for {self.checklist_version} must cover exactly {criteria}")
         if set(self.disqualifiers) != set(CHECKLIST_DISQUALIFIERS):
             raise ValueError(f"disqualifiers must cover exactly {CHECKLIST_DISQUALIFIERS}")
         return self
 
     @model_validator(mode="after")
     def _verdict_matches_checklist_rule_d(self) -> ClassificationRecord:
+        _criteria, threshold = self._checklist
         any_disqualifier_triggered = any(f.triggered for f in self.disqualifiers.values())
         criteria_met = sum(1 for f in self.criteria.values() if f.satisfied)
         eligible = (
-            self.a0_satisfied
-            and not any_disqualifier_triggered
-            and criteria_met >= MIN_CRITERIA_FOR_ELIGIBLE
+            self.a0_satisfied and not any_disqualifier_triggered and criteria_met >= threshold
         )
         expected = "eligible" if eligible else "disqualified"
         if self.verdict != expected:
             raise ValueError(
                 f"verdict={self.verdict!r} contradicts checklist rule D for {self.event_id} "
                 f"(a0={self.a0_satisfied}, disqualifier_triggered={any_disqualifier_triggered}, "
-                f"criteria_met={criteria_met}/9) -> rule D requires {expected!r}"
+                f"criteria_met={criteria_met}/{len(self.criteria)}) -> rule D requires {expected!r}"
             )
         return self
 

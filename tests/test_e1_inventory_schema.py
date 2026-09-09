@@ -196,3 +196,52 @@ def test_check_leakage_flags_classification_of_event_with_pending_fields() -> No
         {event.event_id: event}, {doc.doc_id: doc}, {classification.event_id: classification}
     )
     assert any("pending_fields" in p for p in problems)
+
+
+def make_v11_classification(**overrides: object) -> ClassificationRecord:
+    """Запись по чек-листу v1.1: восемь применимых признаков, без П-7."""
+    criteria = {
+        f"П-{i}": CriterionFinding(satisfied=True, grounds="ok") for i in (1, 2, 3, 4, 5, 6, 8)
+    }
+    criteria["П-9"] = CriterionFinding(satisfied=False, grounds="история не читалась")
+    fields = dict(
+        event_id="e1-ix-1",
+        checklist_version="event_checklist_E1_v1_1",
+        a0_satisfied=True,
+        a0_grounds="раскрыто",
+        criteria=criteria,
+        disqualifiers={
+            f"Д-{i}": DisqualifierFinding(triggered=False, grounds="n/a") for i in range(1, 11)
+        },
+        verdict="eligible",
+        verdict_grounds="7 из 8 применимых",
+        classified_at=datetime(2026, 9, 6, tzinfo=UTC),
+    )
+    fields.update(overrides)
+    return ClassificationRecord(**fields)
+
+
+def test_v11_counts_seven_of_eight_applicable_criteria() -> None:
+    """П-7 не входит в счёт: он адресован выкупу по ст. 75-76, которого в инвентаре нет."""
+    record = make_v11_classification()
+    assert record.verdict == "eligible"
+    assert "П-7" not in record.criteria
+
+
+def test_v11_rejects_a_record_that_still_carries_p7() -> None:
+    """Набор признаков должен точно соответствовать названной версии чек-листа."""
+    criteria = {f"П-{i}": CriterionFinding(satisfied=True, grounds="ok") for i in range(1, 10)}
+    with pytest.raises(ValidationError):
+        make_v11_classification(criteria=criteria)
+
+
+def test_v10_still_requires_all_nine_criteria() -> None:
+    """Версия 1.1 не отменяет 1.0 задним числом: запись судится по названной ею версии."""
+    criteria = {f"П-{i}": CriterionFinding(satisfied=True, grounds="ok") for i in (1, 2, 3, 4, 5, 6, 8, 9)}
+    with pytest.raises(ValidationError):
+        make_v11_classification(checklist_version="event_checklist_E1_v1", criteria=criteria)
+
+
+def test_unknown_checklist_version_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        make_v11_classification(checklist_version="event_checklist_E1_v9")
