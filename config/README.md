@@ -18,7 +18,7 @@ directories exist now so config layout is decided once, matching TZ 28:
 | `execution_specs/` | `ExecutionSpecification` versions (TZ 5.6) |
 | `protective_policies/` | `ProtectivePolicy` versions (TZ 5.7) |
 | `event_schemas/` | Structured event JSON schemas, by `schema_version` (TZ 6.3, 20) |
-| `checklists/` | Frozen event checklists, e.g. `event_checklist_E1_v1.md` (TZ 0.2) |
+| `checklists/` | Reserved for a pipeline-loadable copy of frozen checklists, once Stage E1 builds the loader. The canonical frozen original + hash registry lives in `../docs/artifacts/` (TZ 0.2) — do not fork content between the two locations. |
 | `restricted_list/` | Restricted instrument list versions (TZ 26 `restricted_list_versions`) |
 | `factor_limits/` | Factor exposure limit sets (TZ 26 `factor_limits`) |
 | `cash_policy/` | Cash Manager policy (TZ 11) |

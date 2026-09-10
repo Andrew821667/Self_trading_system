@@ -1,0 +1,21 @@
+{
+  "md5_from_index": "58d96d0c2f452c556a6ac2db0fc586ff",
+  "sha256": "e3ff60f8dd2dadccac6fd6397d29467370caad66e651395dbccfbc8412e813b9",
+  "bytes": 616121,
+  "url": "https://www.disclosure.ru/issuer/GetFileMD5?md5=58d96d0c2f452c556a6ac2db0fc586ff",
+  "source_type": "disclosure_agency_akm",
+  "inn": "4024002029",
+  "issuer": "Публичное акционерное общество \"Агрегатный завод\"",
+  "title": "Направление добровольного или обязательного предложения, касающегося приобретения акций ПАО, в Банк России 02.03.2022 02.03.2022",
+  "published_at": "02.03.2022",
+  "retrieved_at": "2026-08-25T10:33:18+00:00",
+  "legal_use_status": "public_disclosure",
+  "renditions": [
+    {
+      "member": "58d96d0c2f452c556a6ac2db0fc586ff.pdf",
+      "method": "ocr",
+      "chars": 2016,
+      "rendition": "58d96d0c2f452c556a6ac2db0fc586ff--58d96d0c2f452c556a6ac2db0fc586ff.txt"
+    }
+  ]
+}

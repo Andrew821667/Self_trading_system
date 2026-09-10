@@ -1,0 +1,21 @@
+{
+  "md5_from_index": "2760968246b3d9251a1167242a704d36",
+  "sha256": "bb74a7e58e39468e0a6cb65e013090855ea220333867fafa2b978c0b7ebc9009",
+  "bytes": 9426702,
+  "url": "https://www.disclosure.ru/issuer/GetFileMD5?md5=2760968246b3d9251a1167242a704d36",
+  "source_type": "disclosure_agency_akm",
+  "inn": "5034050231",
+  "issuer": "Акционерное общество \"Научно-производственное предприятие \"Респиратор\"",
+  "title": "Добровольное предложение о приобретении эмиссионных ценных бумаг 06.09.2016",
+  "published_at": "06.09.2016",
+  "retrieved_at": "2026-08-25T10:43:00+00:00",
+  "legal_use_status": "public_disclosure",
+  "renditions": [
+    {
+      "member": "2760968246b3d9251a1167242a704d36.pdf",
+      "method": "text_layer",
+      "chars": 71500,
+      "rendition": "2760968246b3d9251a1167242a704d36--2760968246b3d9251a1167242a704d36.txt"
+    }
+  ]
+}

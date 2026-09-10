@@ -1,0 +1,21 @@
+{
+  "md5_from_index": "10b507738d27f50b10abf3627e681983",
+  "sha256": "8604b2a88a441ebfb15eb71e4ccb95d45d82601685eabed0f95c47946d776805",
+  "bytes": 3377454,
+  "url": "https://www.disclosure.ru/issuer/GetFileMD5?md5=10b507738d27f50b10abf3627e681983",
+  "source_type": "disclosure_agency_akm",
+  "inn": "6911003670",
+  "issuer": "Акционерное общество \"Агрофирма Дмитрова Гора\"",
+  "title": "Добровольное предложение 15.07.2022 15.07.2022",
+  "published_at": "15.07.2022",
+  "retrieved_at": "2026-08-25T10:44:23+00:00",
+  "legal_use_status": "public_disclosure",
+  "renditions": [
+    {
+      "member": "10b507738d27f50b10abf3627e681983.pdf",
+      "method": "ocr",
+      "chars": 25573,
+      "rendition": "10b507738d27f50b10abf3627e681983--10b507738d27f50b10abf3627e681983.txt"
+    }
+  ]
+}
